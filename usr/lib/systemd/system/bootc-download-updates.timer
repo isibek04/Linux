@@ -1,0 +1,17 @@
+[Unit]
+Description=Download bootc updates
+Documentation=man:bootc(8)
+ConditionPathExists=/run/ostree-booted
+
+[Timer]
+OnBootSec=1h
+OnUnitInactiveSec=8h
+# Spread the pull out so a batch of machines coming up together does not all
+# hit the registry at the same moment.
+RandomizedDelaySec=2h
+# A laptop is asleep or off more often than not, so catch up on a download that
+# was missed rather than skipping until the next 8h mark.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

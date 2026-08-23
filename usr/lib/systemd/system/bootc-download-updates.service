@@ -1,0 +1,15 @@
+[Unit]
+Description=Download bootc updates
+Documentation=man:bootc(8)
+ConditionPathExists=/run/ostree-booted
+# Fetching pulls from a registry, so wait until there is a route to one.
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+# --download-only stages the new image and stops there: nothing reboots, and
+# the running system is untouched. The staged deployment shows up as 'staged'
+# in `bootc status` and becomes the default at the next reboot, whenever that
+# happens to be, so an update is already on disk by the time it is wanted.
+ExecStart=/usr/bin/bootc upgrade --download-only --quiet

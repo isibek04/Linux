@@ -1,0 +1,159 @@
+name: Publish
+
+on:
+  schedule:
+    # Every other day, on the even days of the month. Cron cannot express a
+    # true 48-hour stride -- the day-of-month field resets each month -- so
+    # the cadence slips by a day after 31-day months (30th -> 2nd).
+    - cron: '30 05 2-30/2 * *'
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  release:
+    types: [ published ]
+  workflow_dispatch:
+
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: git.sebz.me
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build:
+    # Runs directly on the ephemeral Hetzner runner host (`hetzner-host`
+    # label) and builds with the host's docker. The earlier nested-podman
+    # approach only worked under the retired on-host rootless-podman runner;
+    # forge-autoscale's job containers are docker/runc with the default
+    # seccomp profile, which blocks the user-namespace clone nested podman
+    # needs ("cannot clone: Operation not permitted / cannot re-exec
+    # process"). Host mode has no node, so no JS actions here — the repo is
+    # cloned by hand.
+    runs-on: hetzner-host
+
+    steps:
+      - name: Clone repository
+        env:
+          # Fail fast instead of prompting on the job's pseudo-terminal —
+          # an unauthenticated fetch of this private repo otherwise hangs
+          # forever on an invisible username prompt.
+          GIT_TERMINAL_PROMPT: '0'
+        run: |
+          set -euo pipefail
+          rm -rf src
+          git init -q src
+          cd src
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
+          # The repo is private: authenticate with the run's token, the same
+          # way actions/checkout does.
+          auth="$(printf 'x-access-token:%s' '${{ github.token }}' | base64 -w0)"
+          if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
+            ref="refs/pull/${{ github.event.pull_request.number }}/head"
+          else
+            ref="${GITHUB_REF}"
+          fi
+          git -c http.extraheader="Authorization: Basic ${auth}" \
+            fetch -q --depth=1 origin "$ref"
+          git checkout -q FETCH_HEAD
+
+      - name: Compute image tags
+        id: meta
+        run: |
+          set -euo pipefail
+          image="${REGISTRY}/${IMAGE_NAME}"
+          image="$(echo "$image" | tr '[:upper:]' '[:lower:]')"
+          tags=""
+
+          case "${{ github.event_name }}" in
+            pull_request)
+              tags="${image}:pr-${{ github.event.pull_request.number }}"
+              ;;
+            release)
+              tags="${image}:latest"
+              ;;
+          esac
+
+          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            tags="${tags} ${image}:main"
+          fi
+
+          # Semver fan-out for v* tags: vX.Y.Z -> X.Y.Z, X.Y, X
+          case "${{ github.ref }}" in
+            refs/tags/v*)
+              v="${GITHUB_REF#refs/tags/v}"
+              tags="${tags} ${image}:${v} ${image}:${v%.*} ${image}:${v%%.*}"
+              ;;
+          esac
+
+          tags="$(echo $tags | xargs -n1 | sort -u | xargs)"
+          echo "tags=${tags}" >> "$GITHUB_OUTPUT"
+          echo "Resolved tags: ${tags}"
+
+      - name: Build image
+        run: |
+          set -euo pipefail
+          cd src
+          args=""
+          for t in ${{ steps.meta.outputs.tags }}; do
+            args="${args} --tag ${t}"
+          done
+          docker build \
+            --pull \
+            --label "org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}" \
+            --label "org.opencontainers.image.revision=${{ github.sha }}" \
+            ${args} \
+            --file Containerfile \
+            .
+
+      # PRs build only -- no push, matching the GitHub workflow's behaviour.
+      - name: Log in to ${{ env.REGISTRY }}
+        if: github.event_name != 'pull_request'
+        run: |
+          echo "${{ secrets.REGISTRY_TOKEN }}" \
+            | docker login "${REGISTRY}" \
+                --username "${{ secrets.REGISTRY_USER }}" \
+                --password-stdin
+
+      - name: Push image
+        if: github.event_name != 'pull_request'
+        run: |
+          set -euo pipefail
+          for t in ${{ steps.meta.outputs.tags }}; do
+            docker push "$t"
+          done
+
+      # Keyless cosign is not available on Forgejo: it needs a Fulcio-trusted
+      # OIDC issuer, which Forgejo Actions does not provide. Signing therefore
+      # uses a key pair. Skipped automatically when COSIGN_PRIVATE_KEY is unset.
+      - name: Sign the published image
+        if: github.event_name != 'pull_request'
+        env:
+          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "${COSIGN_PRIVATE_KEY}" ]; then
+            echo "COSIGN_PRIVATE_KEY not set -- skipping signing."
+            exit 0
+          fi
+          if ! command -v cosign >/dev/null 2>&1; then
+            echo "cosign not installed on the runner host -- skipping signing."
+            exit 0
+          fi
+          for t in ${{ steps.meta.outputs.tags }}; do
+            digest="$(docker inspect --format '{{ index .RepoDigests 0 }}' "$t")"
+            cosign sign --yes --key env://COSIGN_PRIVATE_KEY "${digest}"
+          done
+
+      # The ephemeral server lives ~5 more minutes and may take the next job;
+      # keep its disk clean but leave tagged layers as cache for a queued
+      # follow-up build.
+      - name: Clean up
+        if: always()
+        run: |
+          rm -rf src || true
+          docker image prune -f || true
+          df -h / | tail -1

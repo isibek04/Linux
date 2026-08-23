@@ -1,0 +1,9 @@
+AGENTS.md
+
+# Build artifacts -- a disk image is tens of GB
+output/
+*.iso
+*.img
+*.qcow2
+*.raw
+__pycache__/
