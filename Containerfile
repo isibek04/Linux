@@ -26,8 +26,11 @@ ARG BOOTC_REF=""
 
 # The C-side build inputs. rustc and cargo come from rustup rather than the
 # archive because bootc's minimum supported Rust version moves faster than a
-# Debian stable release does.
-RUN apt-get update \
+# Debian stable release does. The ostree packages come from forky via a
+# pin (see ostree-forky.sh): bootc needs libostree >= 2025.3, trixie has
+# 2025.2.
+COPY build/ostree-forky.sh /tmp/build/
+RUN /tmp/build/ostree-forky.sh \
  && apt-get install -y --no-install-recommends \
       build-essential ca-certificates curl git go-md2man jq \
       libostree-dev libzstd-dev make ostree pkgconf \
@@ -56,7 +59,9 @@ COPY --from=builder /output/ /
 COPY usr/ /usr/
 COPY build/ /tmp/build/
 
-RUN /tmp/build/apt-sources.sh && apt-get upgrade -y
+# apt-sources.sh writes the trixie sources; ostree-forky.sh layers the forky
+# pin on top so the runtime libostree matches the one bootc was built against.
+RUN /tmp/build/apt-sources.sh && /tmp/build/ostree-forky.sh && apt-get upgrade -y
 
 # Before the kernel: its postinst generates an initramfs with whatever dracut
 # config exists at that moment.
