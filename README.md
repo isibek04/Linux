@@ -72,23 +72,43 @@ Debian's libvirt runs as `libvirt-qemu`, Fedora's as `qemu`.
 ## What os3 has that this does not
 
 Everything installed here comes from the Debian archive. These are the os3
-packages that has no Debian equivalent, left out of this first cut:
+packages that have no Debian equivalent, left out of this first cut:
 
 | os3 | Why not here |
 | --- | --- |
-| rpmfusion codecs | No Debian equivalent. Patent-encumbered decoders are not in the archive; `deb-multimedia` is the third-party option. |
-| `google-chrome-stable` | Google's own apt repo. Firefox ESR is installed instead. |
+| rpmfusion codecs | No Debian equivalent for the DVD/BluRay side; `deb-multimedia` is the third-party option. Note that trixie's own `ffmpeg` already links `libx264` and `libx265`, so H.264/H.265 playback is not the gap this row once implied. |
+| `google-chrome-stable` | Google's own apt repo. Firefox ESR is installed instead; `chromium` is in main if a Blink browser is wanted without the repo. |
 | `discord` | Vendor `.deb` download only. |
-| `steam`, `gamescope` | Steam is in `non-free` and needs i386 multiarch; gamescope is not packaged for Debian at all. `mangohud` is installed. |
+| `steam`, `gamescope` | `steam-installer` is in `contrib`, which is enabled here, but wants i386 multiarch; gamescope is not packaged for Debian at all. `mangohud` is installed. |
 | `tailscale` | `pkgs.tailscale.com` apt repo. |
-| `gh`, `glab`, `tea` | GitHub's apt repo, GitLab's repo, and a release binary respectively. |
+| `tea` | Gitea's CLI is a release binary. Debian ships a `tea` package, but it is an unrelated text editor, so the name is not usable. |
 | `uv` | Astral release binary. |
 | `nix` | Debian has `nix-bin` and `nix-setup-systemd`; skipped along with the `ostree-state-overlay@nix` unit that goes with it. |
 | `v4l2loopback`, `akmods` | Debian's route is `v4l2loopback-dkms` built against the image kernel at build time. Not wired up. |
 | DNIe PKCS#11 | Upstream ships an RPM. Would need unpacking, and Debian's CA trust layout differs from Fedora's. |
 
 Each is additive — a repo, a keyring and a package name — so they can come back
-one at a time.
+one at a time. `gh` and `glab` used to be on this list and are not any more:
+both are in trixie `main` and are installed.
+
+## Recommends are installed
+
+Stage 2 installs with apt's recommends left on, everywhere. Debian's
+`--no-install-recommends` habit comes from servers, where a lean root is the
+point; this image is a desktop, and a good deal of what makes one work is
+recommended rather than depended on. Concretely, leaving them on is what brings
+in `intel-microcode` and `amd64-microcode`, the GPU firmware, `shim-signed`,
+podman's rootless networking (`passt`, `slirp4netns`, `aardvark-dns`),
+virt-manager's SPICE console and qemu's display modules — every one of which
+had to be noticed and added by hand otherwise.
+
+It costs roughly 180 packages and 700 MiB of installed size against the old
+flag-everywhere build, the bulk of it a C toolchain reached through
+`npm` → `node-gyp` → `build-essential`, plus `buildah` from podman.
+
+Stage 1 keeps `--no-install-recommends`: nothing there is shipped, only
+`/output` is copied forward, so recommends would cost build time and buy the
+image nothing.
 
 The setcap step at the end of os3's Containerfile has no counterpart here. It
 restores file capabilities that the CI runner's docker drops when it re-pushes

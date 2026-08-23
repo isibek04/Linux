@@ -29,6 +29,10 @@ ARG BOOTC_REF=""
 # Debian stable release does. The ostree packages come from forky via a
 # pin (see ostree-forky.sh): bootc needs libostree >= 2025.3, trixie has
 # 2025.2.
+#
+# --no-install-recommends stays in this stage. Nothing here is shipped -- only
+# /output is copied into stage 2 -- so recommends would buy the image nothing
+# and cost the build time. Stage 2 installs with recommends on throughout.
 COPY build/ostree-forky.sh /tmp/build/
 RUN /tmp/build/ostree-forky.sh \
  && apt-get install -y --no-install-recommends \
@@ -71,11 +75,18 @@ RUN /tmp/build/dracut-config.sh
 # generator that knows about ostree, the ostree stack bootc links against, and
 # the bootloader bootc installs. Nothing user-facing yet.
 #
+# Recommends are left on here, as everywhere below. On this line in particular
+# that is what brings in intel-microcode and amd64-microcode (recommended by
+# firmware-linux), the GPU firmware firmware-misc-nonfree recommends, and
+# shim-signed. dracut Conflicts: initramfs-tools, so the microcode packages'
+# recommend on initramfs-tools is dropped rather than fighting the generator
+# this image actually uses.
+#
 # The kernel metapackage is tried under both names: trixie is around where
 # Debian began offering the architecture-independent `linux-image-generic`
 # alongside the classic `linux-image-amd64`, and which one resolves depends on
 # the state of the archive at build time.
-RUN apt-get install -y --no-install-recommends \
+RUN apt-get install -y \
       dracut \
       ostree \
       systemd-boot systemd-boot-efi \
@@ -84,13 +95,14 @@ RUN apt-get install -y --no-install-recommends \
       firmware-linux-free firmware-linux \
       btrfs-progs cryptsetup dosfstools e2fsprogs fdisk lvm2 xfsprogs \
       ca-certificates \
- && { apt-get install -y --no-install-recommends linux-image-amd64 \
-      || apt-get install -y --no-install-recommends linux-image-generic; }
+ && { apt-get install -y linux-image-amd64 \
+      || apt-get install -y linux-image-generic; }
 
 # LXQt, matching os3's desktop. Debian's `lxqt` metapackage covers roughly what
-# the lxqt-desktop and lxqt-apps groups cover there; sddm is the greeter.
-# Recommends are left on for this one: a desktop metapackage without its
-# recommends is a desktop with no volume control or file associations.
+# the lxqt-desktop and lxqt-apps groups cover there; sddm is the greeter. A
+# desktop metapackage without its recommends is a desktop with no volume
+# control or file associations, which is what first made this line an exception
+# to the old --no-install-recommends default; it is now the rule.
 RUN apt-get install -y \
       lxqt \
       sddm \
@@ -113,19 +125,28 @@ RUN apt-get install -y \
       obs-studio \
       mangohud
 
-# Virtualisation, as in os3.
-RUN apt-get install -y --no-install-recommends \
+# Virtualisation, as in os3. Recommends matter here: they are what give
+# virt-manager its SPICE console (gir1.2-spiceclientgtk-3.0) and qemu its
+# display and OpenGL modules, none of which is optional in practice for a
+# desktop that runs VMs.
+RUN apt-get install -y \
       libvirt-daemon-system libvirt-clients \
       qemu-system-x86 qemu-utils \
       virt-manager \
       bridge-utils dnsmasq-base ovmf swtpm swtpm-tools
 
 # Terminal tooling and the container stack. uidmap is what makes podman work
-# rootless.
-RUN apt-get install -y --no-install-recommends \
+# rootless -- and podman's recommends are what make it work at all beyond that:
+# passt and slirp4netns for rootless networking, aardvark-dns, catatonit,
+# fuse-overlayfs, containers-storage.
+#
+# gh and glab are both in trixie main, so they need no third-party repo. The
+# Gitea CLI still does: Debian's `tea` package is an unrelated text editor.
+RUN apt-get install -y \
       bash-completion btop curl direnv git jq less man-db neovim \
       nodejs npm podman python3 rsync skopeo uidmap unzip wget zip \
-      acct openssh-server power-profiles-daemon
+      acct openssh-server power-profiles-daemon \
+      gh glab
 
 RUN /tmp/build/initramfs.sh
 
