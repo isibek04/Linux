@@ -57,4 +57,16 @@ systemctl enable bootc-download-updates.timer
 
 # New users get their home under /var/home: / is read-only and /home is a
 # symlink into /var.
-sed -i 's|^HOME=.*|HOME=/var/home|' /etc/default/useradd
+#
+# trixie's shadow ships that line commented out -- `# HOME=/home` -- so a
+# substitution anchored on `^HOME=` matches nothing, exits 0, and leaves
+# useradd on its built-in /home default. Match the commented form too, append
+# the line if some future release drops it entirely, and assert the result:
+# this failed silently once already, and a no-op sed under `set -e` looks
+# exactly like a successful one.
+if grep -qE '^#?[[:space:]]*HOME=' /etc/default/useradd; then
+  sed -i 's|^#\?[[:space:]]*HOME=.*|HOME=/var/home|' /etc/default/useradd
+else
+  echo 'HOME=/var/home' >> /etc/default/useradd
+fi
+grep -qx 'HOME=/var/home' /etc/default/useradd

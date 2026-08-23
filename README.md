@@ -194,12 +194,76 @@ bits survive.
 | Workflow | Trigger | Notes |
 | --- | --- | --- |
 | `publish.yml` | push to `main`, PRs, releases, every other day | Unchanged from os3. Builds on the `hetzner-host` runner with the host's docker, pushes to `git.sebz.me`, signs with cosign when `COSIGN_PRIVATE_KEY` is set. PRs build without pushing. |
-| `build-disk.yml` | manual | os3's anaconda-ISO workflow, adapted. Anaconda is Fedora's installer and cannot install a Debian root, so this produces a qcow2 (or raw, or vmdk) disk image instead. |
+| `build-disk.yml` | manual | os3's anaconda-ISO workflow, adapted. Anaconda is Fedora's installer and cannot install a Debian root, so this produces a qcow2 (or raw, or vmdk) disk image instead. Does not currently work — see [Installing to a disk](#installing-to-a-disk). |
 | `cleanup-packages.yml` | daily | Unchanged from os3 apart from the package name. |
 
-`build-disk.yml` is the one that has never run. bootc-image-builder's Debian
-support is untested upstream; if it refuses the image, `bootc install to-disk`
-run from the image itself is the fallback.
+## Installing to a disk
+
+`bootc switch` covers a host that is already running an image-mode system.
+Getting to the first one means writing this image to a disk, and of the two
+routes that looked available, one does not work.
+
+### bootc-image-builder does not build this image
+
+`build-disk.yml` has never run, and running bootc-image-builder against the
+published image by hand shows it cannot. osbuild's `org.osbuild.selinux` stage
+runs `setfiles` against
+`/etc/selinux/targeted/contexts/files/file_contexts` unconditionally, and a
+Debian root has no targeted policy for it to read:
+
+```
+/run/osbuild/tree/etc/selinux/targeted/contexts/files/file_contexts: No such file or directory
+error: cannot run osbuild: error running osbuild: exit status 1
+```
+
+It dies there every time, before writing any disk, and no bib flag disables the
+stage. The workflow needs either `selinux-policy-default` installed into the
+image or a manifest with that stage patched out before it produces anything.
+Until then it is kept for the record rather than because it works.
+
+### bootc install to-disk, with two flags that are not optional
+
+Run from the image itself, against a file over loopback:
+
+```
+truncate -s 40G disk.raw
+podman run --rm --privileged --pid=host \
+  --security-opt label=type:unconfined_t \
+  -v /dev:/dev -v /var/lib/containers:/var/lib/containers -v .:/work \
+  git.sebz.me/sebastian/os4:main \
+  bootc install to-disk --via-loopback --wipe --filesystem ext4 \
+    --composefs-backend --bootloader systemd \
+    --target-imgref git.sebz.me/sebastian/os4:main /work/disk.raw
+```
+
+`--composefs-backend` is what makes it work. bootc installs bootloaders through
+bootupd, which Debian does not package and this image therefore does not carry.
+With the ostree backend that leaves nothing it will accept — `Bootloader::Grub`
+is the only arm that installs anything, and systemd-boot falls through to a
+hard `bootupd is required for ostree-based installs`
+(`crates/lib/src/install.rs`, bootc 1.16.9). systemd-boot is implemented only
+under the composefs backend. The image already asks for composefs in
+`prepare-root.conf` and bootc formats the root with `-O verity` for it, so this
+is the layout it was built for, not a workaround.
+
+`--target-imgref` points the installed system at the published image. It
+matters whenever the thing being installed is a locally derived tag: without
+it the deployment tracks an image reference that exists only on the build host,
+and `bootc upgrade` has nothing to fetch.
+
+### What the installed disk still does not have
+
+No user accounts. Nothing in the Containerfile runs `useradd`, and root has no
+password, so a disk installed as above boots to an sddm greeter with nobody to
+log in as. Either pass `--root-ssh-authorized-keys` and create the account over
+ssh on first boot, or install a thin derived image that adds one — `useradd`
+needs `/var/home` created first, since tmpfiles only makes it at boot and
+`/home` is a symlink into a `/var` the image ships empty.
+
+UEFI is required: the image installs systemd-boot and no BIOS bootloader.
+Secure Boot has to be off — `/usr/lib/systemd/boot/efi/` holds only the
+unsigned `systemd-bootx64.efi`, with no signed counterpart for `shim-signed` to
+chainload.
 
 ## Updates
 
