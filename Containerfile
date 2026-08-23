@@ -1,7 +1,9 @@
 # A Debian workstation, shipped as a bootable container.
 #
-# The Debian counterpart to os3 (Fedora). The desktop, the tooling and the
-# workflows are deliberately close to it; the base is not, and cannot be.
+# The Debian counterpart to os3 (Fedora). The tooling and the workflows are
+# deliberately close to it; the base is not, and cannot be; the desktop is KDE
+# Plasma rather than os3's LXQt, which is a deliberate divergence and not a
+# packaging constraint.
 # Fedora publishes a ready-made fedora-bootc image and packages bootc itself,
 # so os3 starts from `FROM quay.io/fedora/fedora-bootc:44` and is done. Debian
 # publishes no equivalent image and has no bootc package at all -- `bootcd` in
@@ -110,21 +112,49 @@ RUN apt-get install -y \
  && { apt-get install -y linux-image-amd64 \
       || apt-get install -y linux-image-generic; }
 
-# LXQt, matching os3's desktop. Debian's `lxqt` metapackage covers roughly what
-# the lxqt-desktop and lxqt-apps groups cover there; sddm is the greeter. A
-# desktop metapackage without its recommends is a desktop with no volume
+# KDE Plasma 6, where os3 has LXQt. `kde-standard` is Debian's Plasma workspace
+# plus the standard KDE application set -- one tier above `kde-plasma-desktop`,
+# well short of `kde-full`, and roughly the shape the `lxqt` metapackage had.
+# sddm is still the greeter.
+#
+# A desktop metapackage without its recommends is a desktop with no volume
 # control or file associations, which is what first made this line an exception
-# to the old --no-install-recommends default; it is now the rule.
+# to the old --no-install-recommends default; it is now the rule, and it matters
+# more here than it did under LXQt. systemsettings, kscreen, kinfocenter,
+# spectacle, powerdevil, discover, kio-extras, breeze-gtk-theme and the KDE
+# portal are every one of them a recommend rather than a depend. Installed
+# without them, kde-standard is a shell you cannot change the screen resolution
+# from.
+#
+# Wayland by default, X11 still there. plasma-workspace hard-depends on
+# kwin-wayland, so the Wayland session is not optional and is what Plasma 6
+# offers first; kwin-x11 arrives as a kde-plasma-desktop recommend and is left
+# alone, so the X11 session stays in sddm's list as a fallback for the machines
+# and GPUs where Wayland still misbehaves. It costs about 2 MiB.
+#
+# xserver-xorg is no longer named here and is still installed: sddm
+# hard-depends on `xserver-xorg | xserver` whatever the session does, and
+# sddm's own Wayland greeter is marked experimental in 0.21. So the greeter
+# runs on Xorg and the session it starts is Wayland unless you pick otherwise.
+# Flipping the greeter too is one DisplayServer=wayland in
+# /usr/lib/sddm/sddm.conf.d, whenever upstream drops the label.
+#
+# plasma-nm replaces network-manager-gnome. It ships its own OpenVPN
+# configuration UI, so only the NetworkManager-side plugin is still wanted and
+# network-manager-openvpn-gnome is gone; print-manager replaces
+# system-config-printer on the same reasoning. Both are named explicitly rather
+# than left to a recommend -- plasma-nm is recommended here, print-manager is
+# not recommended by anything in this image at all.
 RUN apt-get install -y \
-      lxqt \
+      kde-standard \
       sddm \
-      xserver-xorg \
-      network-manager network-manager-gnome \
-      network-manager-openvpn network-manager-openvpn-gnome \
+      plasma-nm \
+      network-manager network-manager-openvpn \
       pipewire pipewire-pulse pipewire-audio wireplumber \
-      xdg-desktop-portal xdg-desktop-portal-gtk xdg-user-dirs \
+      xdg-desktop-portal xdg-desktop-portal-gtk xdg-desktop-portal-kde \
+      xdg-user-dirs \
       fonts-dejavu fonts-liberation2 fonts-noto fonts-noto-color-emoji \
-      cups cups-filters system-config-printer \
+      cups cups-filters print-manager \
       firefox-esr
 
 # Media playback and the GPU stack. Narrower than os3's multimedia group by

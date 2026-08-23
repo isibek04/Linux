@@ -4,9 +4,10 @@ A Debian 13 (trixie) workstation, built and shipped as a bootable container.
 The Debian counterpart to [os3](https://git.sebz.me/sebastian/os3), which does
 the same thing on Fedora.
 
-Same shape as os3: LXQt on a `bootc` image, published to `git.sebz.me` by
+Same shape as os3 — a desktop on a `bootc` image, published to `git.sebz.me` by
 Forgejo Actions, updates staged in the background rather than applied on a
-reboot you did not ask for.
+reboot you did not ask for — with one deliberate difference: the desktop is KDE
+Plasma 6, where os3 runs LXQt.
 
 ```
 bootc switch git.sebz.me/sebastian/os4:main
@@ -68,6 +69,62 @@ packages actually built and transcribes every directory and symlink into
 rather than the remembered one, and it reads the real modes and owners off the
 tree instead of hardcoding names that differ between the distributions —
 Debian's libvirt runs as `libvirt-qemu`, Fedora's as `qemu`.
+
+## The desktop is KDE Plasma
+
+os3 runs LXQt. This runs Plasma 6.3, which is what trixie ships.
+
+Debian offers the desktop at three sizes, and the middle one is what is
+installed. Numbers below are apt's own resolution of each desktop line against
+trixie, recommends on, because that is how this image installs:
+
+| Desktop line | Packages | Installed size |
+| --- | --- | --- |
+| `kde-plasma-desktop` plus apps named by hand | 1730 | 4482 MiB |
+| **`kde-standard`** | **1903** | **4765 MiB** |
+| `kde-full` | 2367 | 6744 MiB |
+| the `lxqt` line this replaces | 1894 | 5140 MiB |
+
+`kde-standard` is `kde-plasma-desktop` plus 283 MiB, most of it KDE PIM — kmail,
+korganizer, akregator, kaddressbook and the akonadi server behind them — with
+juk and dragonplayer as the media players. Akonadi's first backend alternative
+is `akonadi-backend-sqlite` and that is what resolves, so none of it drags in a
+database daemon. `kde-full` is another 1979 MiB on top: the education suite,
+games, a full TeX Live, marble's map data and 126 MiB of wallpapers.
+
+Worth noting that the tier chosen is *smaller* than the LXQt line it replaces,
+by 375 MiB. `lxqt`'s own recommends pull thunderbird, smplayer, hexchat, qmmp,
+qpdfview, xscreensaver and gucharmap; Plasma's pull a desktop.
+
+### Wayland by default, X11 kept as a fallback
+
+`plasma-workspace` depends on `kwin-wayland`, so the Wayland session is not
+optional, and it is the one Plasma 6 offers first. The X11 session is
+`kwin-x11`, which arrives as a `kde-plasma-desktop` recommend and is left in
+place: it is about 2 MiB, and it is what you pick at the greeter on a machine
+whose GPU is not ready for Wayland yet. `xwaylandvideobridge` comes in too, so
+X11 apps can still see Wayland windows when screen sharing.
+
+The greeter itself is on Xorg. `sddm` hard-depends on `xserver-xorg | xserver`
+whatever the session does, and sddm 0.21 documents its own Wayland greeter as
+experimental. So Xorg is installed either way and the greeter uses it; the
+session it starts is Wayland unless you choose otherwise. Flipping the greeter
+as well is one `DisplayServer=wayland` in `/usr/lib/sddm/sddm.conf.d`, whenever
+upstream drops the label.
+
+### What changed alongside the metapackage
+
+| Was | Is | Why |
+| --- | --- | --- |
+| `lxqt` | `kde-standard` | The desktop. |
+| `network-manager-gnome` | `plasma-nm` | The applet. Named explicitly rather than left to a recommend. |
+| `network-manager-openvpn-gnome` | *(dropped)* | plasma-nm ships its own OpenVPN configuration UI. The NetworkManager-side `network-manager-openvpn` plugin stays. |
+| `system-config-printer` | `print-manager` | The KDE printer KCM. Nothing in this image recommends it, so it is named. |
+| `xserver-xorg` | *(unnamed)* | Still installed, as an sddm dependency rather than a choice. See above. |
+| — | `xdg-desktop-portal-kde` | Arrives as a `plasma-desktop` recommend; named because screen sharing and file dialogs depend on it. `xdg-desktop-portal-gtk` stays for GTK apps. |
+
+`enable-units.sh` needed no change: `sddm.service` is the greeter under both
+desktops, and `power-profiles-daemon` is what powerdevil talks to.
 
 ## What os3 has that this does not
 
