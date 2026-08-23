@@ -110,6 +110,21 @@ Stage 1 keeps `--no-install-recommends`: nothing there is shipped, only
 `/output` is copied forward, so recommends would cost build time and buy the
 image nothing.
 
+## Firmware is named explicitly
+
+The one thing recommends do not cover. Fedora has a single `linux-firmware`
+package, so os3 gets every blob without asking for any; Debian splits the same
+tree per vendor, and `firmware-linux` pulls only the graphics and misc pieces.
+Nothing recommends the rest, so the wifi, bluetooth and audio-DSP firmware is
+listed by name: `firmware-iwlwifi`, `firmware-atheros`, `firmware-realtek`,
+`firmware-brcm80211`, `firmware-sof-signed`, `firmware-intel-sound`,
+`firmware-cirrus`. About 286 MiB, and without it a laptop booting this image
+has no wifi.
+
+Named rather than "everything in `non-free-firmware`", which would be ~944 MiB
+— mostly enterprise NICs, plus 298 MiB of `firmware-qcom-soc` for Qualcomm SoCs
+this amd64 image cannot run on.
+
 The setcap step at the end of os3's Containerfile has no counterpart here. It
 restores file capabilities that the CI runner's docker drops when it re-pushes
 the base image's layers; dpkg records no capabilities to restore them from, and

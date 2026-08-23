@@ -82,6 +82,16 @@ RUN /tmp/build/dracut-config.sh
 # recommend on initramfs-tools is dropped rather than fighting the generator
 # this image actually uses.
 #
+# The wifi, bluetooth and audio-DSP blobs have to be named explicitly, though.
+# Fedora has one linux-firmware package and os3 gets the lot without asking;
+# Debian splits the same tree per vendor and nothing in this image recommends
+# the pieces a laptop needs, so firmware-linux alone leaves a machine with no
+# wifi. iwlwifi and atheros carry their vendors' bluetooth firmware too, and
+# sof-signed is what modern Intel laptops need before they make any sound.
+# Named rather than "every firmware-* in the archive": that would add ~944 MiB,
+# most of it enterprise NICs and firmware-qcom-soc, which is 298 MiB of
+# Qualcomm SoC blobs for machines this amd64 image cannot boot on.
+#
 # The kernel metapackage is tried under both names: trixie is around where
 # Debian began offering the architecture-independent `linux-image-generic`
 # alongside the classic `linux-image-amd64`, and which one resolves depends on
@@ -93,6 +103,8 @@ RUN apt-get install -y \
       systemd-resolved systemd-timesyncd \
       libnss-myhostname libnss-resolve \
       firmware-linux-free firmware-linux \
+      firmware-iwlwifi firmware-atheros firmware-realtek firmware-brcm80211 \
+      firmware-sof-signed firmware-intel-sound firmware-cirrus \
       btrfs-progs cryptsetup dosfstools e2fsprogs fdisk lvm2 xfsprogs \
       ca-certificates \
  && { apt-get install -y linux-image-amd64 \
