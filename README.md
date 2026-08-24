@@ -256,7 +256,7 @@ that have no Debian equivalent, left out of this first cut:
 | --- | --- |
 | rpmfusion codecs | No Debian equivalent for the DVD/BluRay side; `deb-multimedia` is the third-party option. Note that trixie's own `ffmpeg` already links `libx264` and `libx265`, so H.264/H.265 playback is not the gap this row once implied. |
 | `discord` | Vendor `.deb` download only. |
-| `steam`, `gamescope` | `steam-installer` is in `contrib`, which is enabled here, but wants i386 multiarch; gamescope is not packaged for Debian at all. `mangohud` is installed. |
+| `gamescope` | Not packaged for Debian at all. `mangohud` is installed, and so is `steam` — see below. |
 | `tailscale` | `pkgs.tailscale.com` apt repo. |
 | `tea` | Gitea's CLI is a release binary. Debian ships a `tea` package, but it is an unrelated text editor, so the name is not usable. |
 | `uv` | Astral release binary. |
@@ -266,8 +266,8 @@ that have no Debian equivalent, left out of this first cut:
 
 Each is additive — a repo, a keyring and a package name — so they can come back
 one at a time. `gh` and `glab` used to be on this list and are not any more:
-both are in trixie `main` and are installed. `google-chrome-stable` has come off
-it too; see below.
+both are in trixie `main` and are installed. `google-chrome-stable` and `steam`
+have come off it too; see below.
 
 `claude-desktop` was the first row actually done the additive way, in
 `build/claude-desktop.sh`, and `google-chrome.sh` follows it: fetch the key,
@@ -313,6 +313,74 @@ symlinks into `/opt/google/chrome/cron/`, where the script calls `install_key`
 unconditionally and writes to `/usr/share/keyrings` — read-only on a deployed
 host. Nothing runs it today, because this image installs no cron daemon; the
 symlink is removed so that stays true if one is ever added.
+
+### Steam, and why not Valve's own `.deb`
+
+`steam-installer` is in trixie `contrib`, which `apt-sources.sh` already
+enables; `steam-libs`, `steam-libs-i386` and `steam-devices` are in `main`.
+Nothing about Steam needs `non-free`, so the component list is unchanged.
+
+The `.deb` from `repo.steampowered.com` is the obvious alternative, and it is
+*not* the one that avoids multiarch — that was the first thing checked.
+Valve's `steam-launcher` recommends `steam-libs-i386` exactly as Debian's
+package depends on it, because the Steam client is a 32-bit program either
+way. Both
+packages are also wrappers around the same thing: Debian's `/usr/games/steam`
+downloads Valve's own `steam_<version>.tar.gz`, checks it against a SHA-256 in
+the script, and unpacks `bootstraplinux_ubuntu12_32.tar.xz` into
+`~/.steam/debian-installation`; Valve's ships that same tarball inside the
+`.deb`. After first run the client updates itself from Valve's CDN in `$HOME` in
+both cases, so the packaged version — 1.0.0.83 in trixie against 1.0.0.87
+upstream — is the version of the bootstrap, not of the Steam you end up
+running.
+
+What differs is the packaging, and all three differences point the same way for
+an image-mode system:
+
+| | `steam-installer` (trixie) | `steam-launcher` (Valve) |
+| --- | --- | --- |
+| Repository | The archive. No third-party repo, no third key to pin. | Ships `/etc/apt/sources.list.d/steam-stable.list` and `steam-beta.list` as **conffiles**, plus its own keyring. There is no `repo_add_once`-style opt-out to set the way `google-chrome.sh` does; they would have to be deleted after the install. |
+| Maintainer scripts | A `preinst` that shows one debconf note about `nvidia-driver-libs:i386`, and a `postrm`. No `postinst` at all, and nothing written to `/var`. | `preinst`/`postinst`/`prerm`/`postrm`. |
+| Runtime dependency fixing | None. | `/usr/lib/steam/bin_steamdeps.py`, reached through `Depends: apt, python3-apt, pkexec`, which offers to `apt-get install` missing dependencies when the client starts. On a host with a read-only `/usr` that can only ever fail. |
+
+Valve's package also `Conflicts: steam-devices` while `Provides:`-ing it, so
+the two routes are mutually exclusive rather than complementary: you take one
+set of udev rules or the other.
+
+So: `steam-installer` and `steam-devices` from the archive, and one
+`dpkg --add-architecture i386` before them. The architecture is recorded in
+`/var/lib/dpkg/arch`, which `bootc-rootfs.sh` moves into `/usr` along with the
+rest of the dpkg database, so a deployed host — and any image built on top of
+this one — still knows i386 is enabled.
+
+Adding the architecture makes apt fetch a second set of indices for every source
+that does not restrict itself. The Debian entries and the forky pin all publish
+i386, so that is fine; the two vendor repositories already pin
+`Architectures: amd64 arm64`, which is why enabling i386 does not send apt
+looking for indices `dl.google.com` and `downloads.claude.ai` do not have.
+
+The cost is about **494 MiB** of i386 packages: `libllvm19:i386` (143 MiB),
+`mesa-vulkan-drivers:i386` (83 MiB) and `mesa-libgallium:i386` (44 MiB) are most
+of it — a second, 32-bit copy of the GPU stack. Much of that arrives through
+recommends, which are on here as everywhere: `mesa-vulkan-drivers:i386`,
+`va-driver-all:i386` and `libsdl2-2.0-0:i386` are all recommends of
+`steam-libs` rather than depends, and without them the client comes up with no
+32-bit Vulkan and no hardware video decode. One recommend that resolves to
+nothing new: `steam-libs` wants `xterm | x-terminal-emulator`, and with a
+provider already installed — `konsole`, from `kde-standard` — apt pulls no
+second terminal in.
+
+Three things this does not do. Steam's own `README.Debian` suggests running it
+as a separate unprivileged user, since games are not sandboxed and can read
+everything the account can — that is a per-host decision, not an image one. It
+ships `examples/50-steam-no-admin-actions.rules`, a polkit rule that silences
+the NetworkManager prompts Steam's SteamOS-derived code raises; it names a
+username, so it stays an example here rather than being installed. And it
+installs no Nvidia libraries: this image is mesa-only, and the `preinst`
+asks for `nvidia-driver-libs:i386` only when it sees `/sys/module/nvidia` —
+which, during a container build, is the *build host's* `/sys`, and which the
+noninteractive frontend skips in any case. Layering the Nvidia stack on top is
+at least possible now that i386 is enabled; it is not attempted here.
 
 ## Recommends are installed
 
