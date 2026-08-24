@@ -55,6 +55,29 @@ else
 fi
 systemctl enable bootc-download-updates.timer
 
+# Installed and deliberately not enabled. tailscale.sh puts the node agent in
+# the image, and the package's postinst enables tailscaled.service through
+# deb-systemd-helper -- so without this line every machine installed from this
+# image would boot a VPN daemon that has never been logged in: a tun device,
+# a socket and port 41641, all of it idle until someone runs `tailscale up`.
+#
+# `tailscale up` is a per-machine step whatever this image does. It needs a
+# login, and the node it registers is named after the host, so there is nothing
+# useful to bake in. So the agent ships and the daemon is off, and
+# `systemctl enable --now tailscaled` is part of setting a machine up. It has
+# to be done once: /etc is writable and merged on a deployed host, so the
+# enable survives `bootc upgrade`, and the state under /var/lib/tailscale that
+# the login writes is host state that upgrades do not touch either.
+#
+# systemctl rather than `deb-systemd-helper disable`, which is what put the
+# symlink there: the helper refuses to run outside a maintainer script. It
+# reads the same /etc symlink anyway, so a derived image that upgrades the
+# package sees a unit the admin disabled and leaves it alone.
+#
+# Unguarded, like the first group above: the Containerfile installs the
+# package, so a missing unit means that step did not do what it says.
+systemctl disable tailscaled.service
+
 # New users get their home under /var/home: / is read-only and /home is a
 # symlink into /var.
 #

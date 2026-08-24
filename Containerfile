@@ -11,13 +11,17 @@
 # from source, and the second assembles the bootable root by hand before
 # installing the desktop on it.
 #
-# Almost everything installed comes from the Debian archive. Three things do
-# not: two vendor apt repositories -- Anthropic's, for the Claude desktop app,
-# and Google's, for Chrome -- each with its signing key pinned to a fingerprint
-# the build refuses to proceed without, and Discord, which publishes no
-# repository at all and so has no key to pin. That still makes this smaller
-# than os3: a handful of things os3 gets from rpmfusion, other third-party
-# repos or vendor downloads are not here. README.md lists them.
+# Almost everything installed comes from the Debian archive. Four things do
+# not: three vendor apt repositories -- Anthropic's, for the Claude desktop
+# app, Google's, for Chrome, and Tailscale's, for the node agent -- each with
+# its signing key pinned to a fingerprint the build refuses to proceed without,
+# and Discord, which publishes no repository at all and so has no key to pin.
+# Tailscale's is the weakest of the three pins: it documents no fingerprint to
+# check the key against the way the other two do, so what build/tailscale.sh
+# records is simply the key the repository serves -- which at least makes a
+# change to it a commit. That still makes this smaller than os3: a handful of
+# things os3 gets from rpmfusion, other third-party repos or vendor downloads
+# are not here. README.md lists them.
 
 # --------------------------------------------------------------------------
 # Stage 1: bootc from source
@@ -288,6 +292,19 @@ RUN /tmp/build/google-chrome.sh
 # rare vendor package that needs no image-mode correction at all. Same
 # constraint as every package step: ahead of bootc-rootfs.sh.
 RUN /tmp/build/discord.sh
+
+# Tailscale's apt repository and the node agent from it, on the terms the first
+# two vendor repos set: a key fetched, its fingerprint checked, this image's own
+# deb822 entry. Like Discord and unlike the other two, it needs no image-mode
+# correction: two binaries in /usr, three units, one conffile, nothing in /opt
+# and nothing under /var, so this step is the whole of it.
+#
+# Where it diverges from upstream's scripts/installer.sh, apart from the pin, is
+# that the daemon is left disabled: the package's postinst enables
+# tailscaled.service, enable-units.sh turns it off again, and `tailscale up` on
+# a machine is what turns it on. Same constraint as every package step: ahead of
+# bootc-rootfs.sh.
+RUN /tmp/build/tailscale.sh
 
 RUN /tmp/build/initramfs.sh
 

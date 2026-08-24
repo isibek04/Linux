@@ -247,17 +247,17 @@ desktops, and `power-profiles-daemon` is what powerdevil talks to.
 
 ## What os3 has that this does not
 
-Almost everything installed here comes from the Debian archive. There are three
-exceptions. Two are vendor apt repositories with a pinned signing key —
-Anthropic's, for the Claude desktop app, and Google's, for Chrome — and the
-third is Discord, which publishes no repository, only a `.deb`. These are the
-os3 packages that have no Debian equivalent, left out of this first cut:
+Almost everything installed here comes from the Debian archive. There are four
+exceptions. Three are vendor apt repositories with a pinned signing key —
+Anthropic's, for the Claude desktop app, Google's, for Chrome, and Tailscale's,
+for the node agent — and the fourth is Discord, which publishes no repository,
+only a `.deb`. These are the os3 packages that have no Debian equivalent, left
+out of this first cut:
 
 | os3 | Why not here |
 | --- | --- |
 | rpmfusion codecs | No Debian equivalent for the DVD/BluRay side; `deb-multimedia` is the third-party option. Note that trixie's own `ffmpeg` already links `libx264` and `libx265`, so H.264/H.265 playback is not the gap this row once implied. |
 | `gamescope` | Not packaged for Debian at all. `mangohud` is installed, and so is `steam` — see below. |
-| `tailscale` | `pkgs.tailscale.com` apt repo. |
 | `tea` | Gitea's CLI is a release binary. Debian ships a `tea` package, but it is an unrelated text editor, so the name is not usable. |
 | `uv` | Astral release binary. |
 | `nix` | Debian has `nix-bin` and `nix-setup-systemd`; skipped along with the `ostree-state-overlay@nix` unit that goes with it — which would also mean installing `ostree-boot`, since that is where the unit template lives and this image does not currently pull it in. |
@@ -266,14 +266,14 @@ os3 packages that have no Debian equivalent, left out of this first cut:
 
 Each is additive — a repo, a keyring and a package name — so they can come back
 one at a time. `gh` and `glab` used to be on this list and are not any more:
-both are in trixie `main` and are installed. `google-chrome-stable`, `steam` and
-`discord` have come off it too; see below.
+both are in trixie `main` and are installed. `google-chrome-stable`, `steam`,
+`discord` and `tailscale` have come off it too; see below.
 
 `claude-desktop` was the first row actually done the additive way, in
-`build/claude-desktop.sh`, and `google-chrome.sh` follows it: fetch the key,
-**pin its fingerprint**, write a deb822 entry, install the package. The pin is
-the part worth copying — a keyring baked into the image authorises root-owned
-packages on every host that boots it.
+`build/claude-desktop.sh`, and `google-chrome.sh` and `tailscale.sh` follow it:
+fetch the key, **pin its fingerprint**, write a deb822 entry, install the
+package. The pin is the part worth copying — a keyring baked into the image
+authorises root-owned packages on every host that boots it.
 
 ### Chrome, and why not just `chromium`
 
@@ -432,20 +432,22 @@ that survives image updates and is invisible to them.
 
 #### Which makes it the easiest vendor package here to ship read-only
 
-The three third-party installs, on what image mode actually asks of them:
+The four third-party installs, on what image mode actually asks of them:
 
 | | Trust anchor | Lands in `/opt` | Self-update target |
 | --- | --- | --- | --- |
 | `claude-desktop` | Anthropic's key, fingerprint pinned | No — `/usr/lib` | apt, so the image |
 | `google-chrome-stable` | Google's key, fingerprint pinned | 431 MiB, folded into `/usr/lib/opt`; AppArmor profile re-pointed, daily cron symlink removed | apt, so the image — but `/etc/cron.daily/google-chrome` would write to a read-only `/usr/share/keyrings` |
 | `discord` | TLS to `discord.com` | No | `$HOME`, which is writable |
+| `tailscale` | Tailscale's key, fingerprint recorded — but not one Tailscale publishes | No — `/usr/bin`, `/usr/sbin` | apt, so the image — unless `--auto-update` is switched on, which shells out to `apt-get` and cannot work here |
 
 Nothing of Discord's goes to `/opt`, so there is no tree for `bootc-rootfs.sh`
 to fold and no path to re-point. Nothing writes to `/usr` after the install
 either — the self-updater's target is under `$HOME`, where Chrome's cron script
 and Valve's `bin_steamdeps.py` would both be reaching for a `/usr` that is not
-writable. It needs no image-mode correction at all, which none of the others
-managed.
+writable. It needs no image-mode correction at all — of the other three only
+`tailscale` manages that, and for the opposite reason: it writes nowhere after
+the install rather than writing somewhere writable.
 
 Two smaller things, neither of them a correction. Its AppArmor profile attaches
 to `@{HOME}/.config/discord/app-*/Discord`, which resolves to a path nothing on
@@ -460,6 +462,104 @@ The script is `/bin/sh` without `set -e` and ends on an `rm -f`, so dpkg sees
 exit 0 and the install succeeds; the profile is a conffile under
 `/etc/apparmor.d` and `apparmor.service` loads it at boot regardless. The line
 in the build log is noise, not a failure.
+
+### Tailscale, and a daemon that ships disabled
+
+The third vendor apt repository here, and the most recent row to come off the
+os3 list above. `build/tailscale.sh` is the pattern `claude-desktop.sh` set —
+fetch the key, pin its fingerprint, write a deb822 entry, install — and what is
+worth spelling out is where it departs from Tailscale's own installer. Reduced
+to what it does on a Debian host, `scripts/installer.sh` is:
+
+```sh
+curl … "https://pkgs.tailscale.com/$TRACK/$OS/$VERSION.noarmor.gpg" \
+  > /usr/share/keyrings/tailscale-archive-keyring.gpg
+curl … "https://pkgs.tailscale.com/$TRACK/$OS/$VERSION.tailscale-keyring.list" \
+  > /etc/apt/sources.list.d/tailscale.list
+apt-get install -y tailscale tailscale-archive-keyring
+systemctl enable --now tailscaled
+```
+
+The middle of that is what this image wants too — a keyring, a source entry,
+the package. The last line is not, and the first is missing a check.
+
+#### The pin is real; the claim behind it is weaker than the other two
+
+The key `pkgs.tailscale.com` serves is
+`2596A99EAAB33821893C0A79458CA832957F5868`, *Tailscale Inc. (Package repository
+signing key)*, and `tailscale.sh` refuses to continue if the fetch returns
+anything else. But unlike Anthropic and Google, Tailscale publishes no
+fingerprint alongside the repository to check that against: the constant in the
+script was read off the key the repository serves, not out of documentation. So
+it is not a second opinion about the key — it is a record of the one the build
+first saw, which is still enough to make a change to it a commit rather than a
+Tuesday.
+
+The repository is keyed by Debian codename rather than a `stable` suite, so the
+suite follows `apt-sources.sh`'s `DEBIAN_SUITE`. A codename Tailscale does not
+publish 404s on the key fetch and stops the build, which is the right way for
+that to fail. `Architectures: amd64 arm64` is set as it is on the other two
+vendor entries, for a different reason: those two publish no i386 indices at
+all, so the line is what keeps the multiarch Steam enabled from breaking
+`apt-get update`, while `pkgs.tailscale.com` does publish i386 and the line only
+avoids fetching a ~90 KiB index nothing here would install from.
+
+#### The keyring goes under a name of this image's own
+
+`tailscale` *recommends* `tailscale-archive-keyring`, and [recommends are
+installed](#recommends-are-installed), so that package arrives with it and ships
+`/usr/share/keyrings/tailscale-archive-keyring.gpg` — over the top of the file
+the script just fingerprint-checked, if the two shared a name. So this image's
+copy is the armoured form under `.asc`, and the package's is left referenced by
+nothing, like the `google-chrome.gpg` Chrome's `postinst` drops. Today they are
+the same key and the `.gpg` is byte-for-byte the `.noarmor.gpg` the installer
+would have fetched; the point of the separate name is that this stays true
+whether or not that holds tomorrow.
+
+#### Nothing else needs correcting, and that is unusual here
+
+The `.deb` is two Go binaries — `/usr/bin/tailscale` and `/usr/sbin/tailscaled`,
+about 74 MiB together — three units in `/usr/lib/systemd/system`, and one
+conffile, `/etc/default/tailscaled`. Nothing in `/opt` for `bootc-rootfs.sh` to
+fold into `/usr/lib/opt`, and nothing under `/var` for it to transcribe:
+`tailscaled.service` carries `StateDirectory=tailscale`, so `/var/lib/tailscale`
+is created by systemd at first start rather than shipped by the package. The
+DNS side needs nothing either — `systemd-resolved` is installed and
+`/etc/resolv.conf` is the stub symlink `bootc-rootfs.sh` restores, which is what
+MagicDNS wants to talk to.
+
+What it must not be told to do is update itself. `tailscale set --auto-update`
+runs the platform's package manager, which on Debian means `apt-get install`
+against `/etc/apt/sources.list.d/tailscale.list` — a file this image does not
+write, into a `/usr` it cannot write, with a dpkg database that lives in
+`/usr/lib/sysimage/dpkg` and is read-only too. Auto-update is off by default;
+leave it off. New Tailscale versions arrive the way everything else here does,
+in the next image.
+
+#### The daemon is installed and left off
+
+The `postinst` enables `tailscaled.service` through `deb-systemd-helper`;
+`enable-units.sh` disables it again. Without that, every machine installed from
+this image would boot a VPN agent that has never been logged in — a tun device,
+a socket and port 41641, idle until someone runs `tailscale up`.
+
+And `tailscale up` is a per-machine step whatever the image does: it needs a
+login, and the node it registers is named after the host, so there is nothing
+useful to bake in. Turning it on is once per machine:
+
+```
+sudo systemctl enable --now tailscaled
+sudo tailscale up
+```
+
+Both halves survive updates. The enable is a symlink under `/etc`, which is
+writable on a deployed host and merged across a `bootc upgrade`; the login is
+state under `/var/lib/tailscale`, which upgrades do not touch. It also survives
+the package: `enable-units.sh` uses `systemctl disable` rather than
+`deb-systemd-helper disable` — the helper refuses to run outside a maintainer
+script — and since the helper decides by looking at that same `/etc` symlink, a
+derived image that upgrades `tailscale` sees a unit the admin disabled and
+leaves it alone.
 
 ## Recommends are installed
 
