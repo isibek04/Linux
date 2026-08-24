@@ -25,9 +25,20 @@ FROM docker.io/library/debian:trixie AS builder
 
 ARG DEBIAN_FRONTEND=noninteractive
 
-# Tag of bootc-dev/bootc to build. Empty resolves to the newest release at
-# build time; set it to a tag (e.g. v1.7.0) to pin the build.
-ARG BOOTC_REF=""
+# Tag of bootc-dev/bootc to build. Pinned, because this is the boot path and
+# publish.yml builds on a schedule: left empty it resolves to whatever the
+# newest upstream release happens to be when the timer fires, so an unattended
+# build could replace the thing that mounts the root filesystem with a version
+# nobody has booted. Bumping it is a commit, which is where a change like that
+# belongs.
+#
+# v1.16.9 is also the release the README's source references were read against
+# (the bootupd/systemd-boot branch in install.rs, the kargs handling in
+# bootc_composefs/boot.rs), so pinning it keeps the documentation and the
+# binary describing the same program.
+#
+# Set to a different tag to test one; empty still means "newest release".
+ARG BOOTC_REF="v1.16.9"
 
 # The C-side build inputs. rustc and cargo come from rustup rather than the
 # archive because bootc's minimum supported Rust version moves faster than a

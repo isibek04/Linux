@@ -7,10 +7,11 @@
 # inputs are the Debian archive, crates.io and a tagged bootc release.
 set -euo pipefail
 
-# BOOTC_REF is passed through from the Containerfile's build arg. Empty means
-# "whatever the newest release is", resolved against the GitHub release API the
-# same way os3 resolves the Gitea CLI version. Pin it to a tag (v1.2.3) for a
-# reproducible build.
+# BOOTC_REF is passed through from the Containerfile's build arg, where it is
+# pinned to a tag. Empty still resolves to the newest release, against the
+# GitHub release API the same way os3 resolves the Gitea CLI version -- useful
+# for testing what upstream has moved to, but not what a scheduled build
+# should do unattended. See the ARG in the Containerfile.
 ref="${BOOTC_REF:-}"
 if [ -z "${ref}" ]; then
   ref="$(curl -fsSL https://api.github.com/repos/bootc-dev/bootc/releases/latest \
