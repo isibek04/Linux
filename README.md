@@ -292,6 +292,59 @@ matters whenever the thing being installed is a locally derived tag: without
 it the deployment tracks an image reference that exists only on the build host,
 and `bootc upgrade` has nothing to fetch.
 
+### An encrypted root, and the package it depends on
+
+`to-disk` offers exactly two root layouts: `--block-setup direct`, the default,
+and `--block-setup tpm2-luks`. Anything else — a passphrase-unlocked LUKS
+container, LVM, RAID — means building the block devices by hand and using
+`bootc install to-filesystem` instead.
+
+tpm2-luks works with the composefs backend. The two backends share the whole
+block-device path: `install_to_disk` calls `baseline::install_create_rootfs`,
+which is where LUKS is set up, and only branches on the backend afterwards in
+`install_to_filesystem_impl`. The kargs that baseline generates reach the boot
+entry, because `setup_composefs_bls_boot` extends its cmdline with
+`root_setup.kargs` (`crates/lib/src/bootc_composefs/boot.rs`, bootc 1.16.9).
+`-O verity` is still applied to the ext4 root, on the `/dev/mapper` device
+rather than the partition, so the `verity=require` this image asks for in
+`prepare-root.conf` holds over dm-crypt.
+
+What it needs from the image is `tpm2-tools`, and not for anything a user would
+type. dracut's `91tpm2-tss` is the only module that puts libtss2 and
+`libcryptsetup-token-systemd-tpm2.so` into the initrd, its `check()` is
+`require_binaries tpm2 || return 1`, and `01systemd-cryptsetup` only picks a
+module up as a dependency when its check returns 255. Miss the binary and the
+initrd is built with `systemd-cryptsetup` but nothing to reach `/dev/tpmrm0`
+with — systemd-cryptsetup dlopens libtss2 rather than linking it, so no
+automatic dependency tracking saves it. The install itself succeeds either way,
+since enrolment runs from the container, which does have the libraries; the
+disk then fails to unlock its root on first boot. `tpm2-tools` is on the
+block-tools line in the Containerfile for this reason alone.
+
+Two edges remain sharp even with the package in place. bootc enrols the TPM
+with `systemd-cryptenroll --wipe-slot=all` (`crates/lib/src/install/baseline.rs`),
+so the TPM is the *only* keyslot on the installed disk, and it writes
+`luks.options=tpm2-device=auto,headless=true` into the boot entry, which
+suppresses the passphrase prompt whether or not a passphrase slot exists.
+Enrolling a recovery key is therefore the first thing to do after first boot,
+while the TPM can still authorise the new slot:
+
+```
+systemd-cryptenroll --unlock-tpm2-device=auto --recovery-key /dev/nvme0n1p4
+```
+
+That key is a way back in from live media or from a boot where `headless=true`
+has been edited out of the cmdline in the systemd-boot menu, not something the
+normal boot path will ever ask for. The realistic way to need it is PCR 7:
+systemd-cryptenroll binds to it by default, it measures Secure Boot state, and
+a firmware update is enough to change it.
+
+Partition 4, not 3: tpm2-luks is the one setup whose `requires_bootpart()` is
+true, so the disk gains a separate XBOOTLDR `/boot` between the ESP and the
+root, on top of the 1 MiB BIOS-BOOT partition bootc writes on x86_64 whether
+or not anything will ever boot from it. `lsblk -f` and the `crypto_LUKS` row
+settle it on any given disk.
+
 ### What the installed disk still does not have
 
 No user accounts. Nothing in the Containerfile runs `useradd`, and root has no

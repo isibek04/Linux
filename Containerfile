@@ -94,6 +94,17 @@ RUN /tmp/build/dracut-config.sh
 # most of it enterprise NICs and firmware-qcom-soc, which is 298 MiB of
 # Qualcomm SoC blobs for machines this amd64 image cannot boot on.
 #
+# tpm2-tools is installed for the initramfs, not for the command line.
+# dracut's 91tpm2-tss module is the only one that puts libtss2 and
+# libcryptsetup-token-systemd-tpm2.so into the initrd, and its check() is
+# `require_binaries tpm2 || return 1`. With the binary missing that returns 1
+# rather than 255, so the hostonly=no dependency scan in 01systemd-cryptsetup
+# skips the module -- and systemd-cryptsetup dlopens libtss2 rather than
+# linking it, so nothing else drags the library in either. The initrd then has
+# no way to reach /dev/tpmrm0: `bootc install --block-setup tpm2-luks` enrols
+# the key happily and the installed disk fails to unlock its root at boot,
+# with `--wipe-slot=all` having left the TPM as the only keyslot.
+#
 # The kernel metapackage is tried under both names: trixie is around where
 # Debian began offering the architecture-independent `linux-image-generic`
 # alongside the classic `linux-image-amd64`, and which one resolves depends on
@@ -107,7 +118,7 @@ RUN apt-get install -y \
       firmware-linux-free firmware-linux \
       firmware-iwlwifi firmware-atheros firmware-realtek firmware-brcm80211 \
       firmware-sof-signed firmware-intel-sound firmware-cirrus \
-      btrfs-progs cryptsetup dosfstools e2fsprogs fdisk lvm2 xfsprogs \
+      btrfs-progs cryptsetup tpm2-tools dosfstools e2fsprogs fdisk lvm2 xfsprogs \
       ca-certificates \
  && { apt-get install -y linux-image-amd64 \
       || apt-get install -y linux-image-generic; }
