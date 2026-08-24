@@ -8,7 +8,9 @@
 #   2. The /var tree the packages just built is transcribed into tmpfiles.d
 #      entries, so it can be recreated at boot.
 #   3. /var and the other state directories are emptied and replaced with
-#      symlinks into /var, which is what ostree expects to find.
+#      symlinks into /var, which is what ostree expects to find. /opt is the
+#      one that does not go to /var: it is image content, so it moves to
+#      /usr/lib/opt instead.
 #
 # Run this as the last step before `bootc container lint`: anything that
 # installs packages or writes to /var afterwards will be thrown away.
@@ -71,17 +73,39 @@ EOF
 echo "Wrote $(grep -c '^[dL]' "${out}") tmpfiles.d entries to ${out}"
 
 # --------------------------------------------------------------------------
-# 3. Empty the state directories and link them into /var
+# 3. Empty the state directories and link them into /var (except /opt)
 # --------------------------------------------------------------------------
 # shellcheck disable=SC2114 # Emptying these is the entire point of the script.
-rm -rf /boot /home /root /usr/local /srv /opt /mnt /var
+rm -rf /boot /home /root /usr/local /srv /mnt /var
 mkdir -p /sysroot /boot /usr/lib/ostree /var
+
+# /opt is the exception: it belongs to the image rather than to host state, so
+# it is moved instead of emptied. Everything the package steps installed there
+# goes under /usr, and the conventional path becomes a symlink to it. Vendor
+# software that installs to /opt therefore ships read-only and
+# composefs-verified like the rest of /usr -- and, unlike anything under
+# /var/opt, actually arrives on a host that reaches this image through
+# `bootc upgrade` rather than a fresh install.
+#
+# The cost is that /opt is no longer writable on a deployed host. /usr/local is
+# still backed by /var and is where machine-local additions go. ostree's
+# ostree-state-overlay@opt.service would hand writability back, but it ships in
+# ostree-boot, which this image does not install and which also carries
+# ostree's own boot-time units into an image that boots off bootc's dracut
+# module instead. Upstream's own guidance, in
+# ostree-state-overlay@.service(8), is to prefer symlinking the parts that need
+# to be mutable into /var over overlaying the whole directory anyway.
+mkdir -p /usr/lib/opt
+if [ -d /opt ] && [ ! -L /opt ]; then
+  find /opt -mindepth 1 -maxdepth 1 -exec mv -t /usr/lib/opt {} +
+  rmdir /opt
+fi
+ln -sT usr/lib/opt /opt
 
 ln -sT sysroot/ostree /ostree
 ln -sT var/roothome /root
 ln -sT var/home /home
 ln -sT var/srv /srv
-ln -sT var/opt /opt
 ln -sT var/mnt /mnt
 ln -sT ../var/usrlocal /usr/local
 
@@ -90,7 +114,6 @@ ln -sT ../var/usrlocal /usr/local
 cat > /usr/lib/tmpfiles.d/os4-base-dirs.conf <<'EOF'
 # Targets of the /-level symlinks that replace the state directories.
 d /var/home     0755 root root -
-d /var/opt      0755 root root -
 d /var/srv      0755 root root -
 d /var/mnt      0755 root root -
 d /var/usrlocal 0755 root root -

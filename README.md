@@ -39,7 +39,7 @@ the Containerfile is the part os3 gets for free:
 | `build/enable-units.sh` | Enables the boot-time units, guarding the ones whose names differ between Debian releases. |
 | `build/bootc-rootfs.sh` | Turns the ordinary Debian root into the ostree/composefs layout. |
 
-The base plumbing follows the bootcrew reference closely, with two departures
+The base plumbing follows the bootcrew reference closely, with three departures
 noted below.
 
 ### The dpkg database is moved into /usr
@@ -69,6 +69,37 @@ packages actually built and transcribes every directory and symlink into
 rather than the remembered one, and it reads the real modes and owners off the
 tree instead of hardcoding names that differ between the distributions —
 Debian's libvirt runs as `libvirt-qemu`, Fedora's as `qemu`.
+
+### /opt is image content, not host state
+
+The ostree convention is `/opt` → `/var/opt`, and that is what `bootc-rootfs.sh`
+used to write. It has the same problem as everything else in `/var`: bootc only
+materialises the image's `/var` on the initial install, so vendor software
+installed to `/opt` at build time simply never appears on a host that arrives
+through `bootc upgrade`. The tmpfiles generator above exists precisely because
+of that, and a 431 MiB browser is not a directory you want to recreate with a
+tmpfiles entry.
+
+So `/opt` is the one state directory that is moved rather than emptied. Whatever
+the package steps put there goes to `/usr/lib/opt` — the same relocation
+rpm-ostree does — and `/opt` becomes a symlink to it. Vendor software that
+installs to `/opt` then ships read-only and composefs-verified like the rest of
+`/usr`, and upgrades arrive with the image.
+
+What this costs is a writable `/opt` on a deployed host. `/usr/local` is still
+backed by `/var` and is where machine-local additions belong. ostree's
+`ostree-state-overlay@opt.service` would hand writability back, but it ships in
+`ostree-boot`, which this image does not install and which also carries ostree's
+own boot-time units into an image that boots off bootc's dracut module instead —
+so it is a change to test rather than a drop-in. Upstream's own guidance, in
+`ostree-state-overlay@.service(8)`, is to prefer symlinking just the parts that
+need to be mutable into `/var` over overlaying the whole directory anyway.
+
+Two things follow for anything installed under `/opt`. Paths baked into the
+software have to be re-pointed at `/usr/lib/opt` if they are matched literally
+rather than followed — Chrome's AppArmor profile is the live example. And
+anything that expects to write inside its own `/opt` directory at runtime needs
+that subdirectory symlinked into `/var`; nothing in this image does yet.
 
 ## The desktop is KDE Plasma
 
@@ -128,31 +159,72 @@ desktops, and `power-profiles-daemon` is what powerdevil talks to.
 
 ## What os3 has that this does not
 
-Everything installed here comes from the Debian archive, with one exception:
-the Claude desktop app, from Anthropic's own apt repository. These are the os3
-packages that have no Debian equivalent, left out of this first cut:
+Almost everything installed here comes from the Debian archive. There are two
+exceptions, both vendor apt repositories with a pinned signing key: Anthropic's,
+for the Claude desktop app, and Google's, for Chrome. These are the os3 packages
+that have no Debian equivalent, left out of this first cut:
 
 | os3 | Why not here |
 | --- | --- |
 | rpmfusion codecs | No Debian equivalent for the DVD/BluRay side; `deb-multimedia` is the third-party option. Note that trixie's own `ffmpeg` already links `libx264` and `libx265`, so H.264/H.265 playback is not the gap this row once implied. |
-| `google-chrome-stable` | Google's own apt repo. Firefox ESR is installed instead; `chromium` is in main if a Blink browser is wanted without the repo. |
 | `discord` | Vendor `.deb` download only. |
 | `steam`, `gamescope` | `steam-installer` is in `contrib`, which is enabled here, but wants i386 multiarch; gamescope is not packaged for Debian at all. `mangohud` is installed. |
 | `tailscale` | `pkgs.tailscale.com` apt repo. |
 | `tea` | Gitea's CLI is a release binary. Debian ships a `tea` package, but it is an unrelated text editor, so the name is not usable. |
 | `uv` | Astral release binary. |
-| `nix` | Debian has `nix-bin` and `nix-setup-systemd`; skipped along with the `ostree-state-overlay@nix` unit that goes with it. |
+| `nix` | Debian has `nix-bin` and `nix-setup-systemd`; skipped along with the `ostree-state-overlay@nix` unit that goes with it — which would also mean installing `ostree-boot`, since that is where the unit template lives and this image does not currently pull it in. |
 | `v4l2loopback`, `akmods` | Debian's route is `v4l2loopback-dkms` built against the image kernel at build time. Not wired up. |
 | DNIe PKCS#11 | Upstream ships an RPM. Would need unpacking, and Debian's CA trust layout differs from Fedora's. |
 
 Each is additive — a repo, a keyring and a package name — so they can come back
 one at a time. `gh` and `glab` used to be on this list and are not any more:
-both are in trixie `main` and are installed. `claude-desktop` is the first one
-actually done the additive way, in `build/claude-desktop.sh`, and it is the
-pattern the rows above would follow: fetch the key, **pin its fingerprint**,
-write a deb822 entry, install the package. The pin is the part worth copying —
-a keyring baked into the image authorises root-owned packages on every host
-that boots it.
+both are in trixie `main` and are installed. `google-chrome-stable` has come off
+it too; see below.
+
+`claude-desktop` was the first row actually done the additive way, in
+`build/claude-desktop.sh`, and `google-chrome.sh` follows it: fetch the key,
+**pin its fingerprint**, write a deb822 entry, install the package. The pin is
+the part worth copying — a keyring baked into the image authorises root-owned
+packages on every host that boots it.
+
+### Chrome, and why not just `chromium`
+
+`chromium` is in trixie `main` and would need no third-party repository at all.
+The usual arguments for Google's build mostly do not apply to it: Debian builds
+with `proprietary_codecs=true` and `ffmpeg_branding="Chrome"`, so H.264 and AAC
+work; `use_vaapi=true` on amd64, so hardware decode is compiled in;
+`is_official_build=true`; and Google-assigned API keys ship in
+`/etc/chromium.d/apikeys`. Nor is it stale — trixie tracks upstream closely
+enough that its `chromium` and `google-chrome-stable` are usually on the same
+milestone. Installed size is comparable too, around 375 MiB against Chrome's
+440 MiB.
+
+What Debian cannot ship is the part that decided it:
+
+| | `chromium` (trixie) | `google-chrome-stable` |
+| --- | --- | --- |
+| Widevine CDM | Compiled in (`enable_widevine=true`), but no CDM binary. `widevine-installer` is in `contrib` and reaches trixie only through backports. So no Netflix, Prime Video or Spotify web. | Bundled. |
+| Chromecast | `--media-router=0` in `/etc/chromium.d/default-flags`, from Debian bug #833477. | On. |
+| Component updater | Not wired to Google's component server: no CRLSet revocation updates, no origin-trial tokens. | On. |
+| Sync | Debian's API keys are present, but Google restricted the sync API to official builds in 2021. | Works. |
+| Channels | — | `beta`, `unstable`, `canary` also in the repo. |
+
+`plasma-browser-integration` arrives with `kde-standard` and supports both, and
+`claude-desktop` already creates `/etc/opt/chrome/native-messaging-hosts`. Both
+browsers can be installed side by side if you would rather have the archive
+build as well; `update-alternatives` sorts out `x-www-browser`.
+
+Two things in Chrome's packaging need correcting for an image-mode system, and
+`build/google-chrome.sh` does both. Its AppArmor profile attaches to the literal
+path `/opt/google/chrome/chrome`, and AppArmor matches the resolved path rather
+than the symlink, so the profile has to be re-pointed at `/usr/lib/opt` once
+`bootc-rootfs.sh` has moved the tree — it is inert on Debian, which does not
+restrict unprivileged user namespaces the way Ubuntu does, but a profile that
+silently matches nothing is worse than none. And `/etc/cron.daily/google-chrome`
+symlinks into `/opt/google/chrome/cron/`, where the script calls `install_key`
+unconditionally and writes to `/usr/share/keyrings` — read-only on a deployed
+host. Nothing runs it today, because this image installs no cron daemon; the
+symlink is removed so that stays true if one is ever added.
 
 ## Recommends are installed
 

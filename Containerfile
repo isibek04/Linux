@@ -11,9 +11,12 @@
 # from source, and the second assembles the bootable root by hand before
 # installing the desktop on it.
 #
-# Everything installed comes from the Debian archive. That makes this smaller
-# than os3: a handful of things os3 gets from rpmfusion, third-party repos or
-# vendor downloads are not here. README.md lists them.
+# Almost everything installed comes from the Debian archive, the exceptions
+# being two vendor apt repositories -- Anthropic's, for the Claude desktop app,
+# and Google's, for Chrome -- each with its signing key pinned to a fingerprint
+# the build refuses to proceed without. That still makes this smaller than os3:
+# a handful of things os3 gets from rpmfusion, other third-party repos or vendor
+# downloads are not here. README.md lists them.
 
 # --------------------------------------------------------------------------
 # Stage 1: bootc from source
@@ -206,6 +209,21 @@ RUN apt-get install -y \
 # ahead of bootc-rootfs.sh. The pinned signing key and the reason the package is
 # told not to register its own repo are both in build/claude-desktop.sh.
 RUN /tmp/build/claude-desktop.sh
+
+# Google's apt repository and Chrome from it, on the same terms: a pinned
+# signing key, this image's own deb822 entry, and the package told not to
+# register a second one. Firefox ESR above is still installed; this is the
+# Blink half of the pair. Debian's `chromium` is in main and would need no
+# repository at all, but it ships no Widevine CDM -- Debian's widevine-installer
+# is in contrib and only reaches trixie through backports -- and it disables the
+# media router by default, so DRM video and Chromecast are what the third-party
+# repo buys here.
+#
+# Unlike claude-desktop, which installs to /usr/lib, Chrome unpacks 431 MiB into
+# /opt. bootc-rootfs.sh folds that into /usr/lib/opt; google-chrome.sh re-points
+# the AppArmor profile at the path it will actually have. Same constraint as
+# every package step: it has to stay ahead of bootc-rootfs.sh.
+RUN /tmp/build/google-chrome.sh
 
 RUN /tmp/build/initramfs.sh
 
