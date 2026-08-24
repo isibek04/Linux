@@ -185,10 +185,16 @@ RUN apt-get install -y \
 # gh and glab are both in trixie main, so they need no third-party repo. The
 # Gitea CLI still does: Debian's `tea` package is an unrelated text editor.
 RUN apt-get install -y \
-      bash-completion btop curl direnv git jq less man-db neovim \
+      bash-completion btop curl direnv git gnupg jq less man-db neovim \
       nodejs npm podman python3 rsync skopeo uidmap unzip wget zip \
       acct openssh-server power-profiles-daemon \
       gh glab
+
+# Anthropic's apt repository and the Claude desktop app from it. Wants curl and
+# gnupg from the step above, and like every other package step it has to stay
+# ahead of bootc-rootfs.sh. The pinned signing key and the reason the package is
+# told not to register its own repo are both in build/claude-desktop.sh.
+RUN /tmp/build/claude-desktop.sh
 
 RUN /tmp/build/initramfs.sh
 

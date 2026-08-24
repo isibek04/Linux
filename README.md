@@ -128,7 +128,8 @@ desktops, and `power-profiles-daemon` is what powerdevil talks to.
 
 ## What os3 has that this does not
 
-Everything installed here comes from the Debian archive. These are the os3
+Everything installed here comes from the Debian archive, with one exception:
+the Claude desktop app, from Anthropic's own apt repository. These are the os3
 packages that have no Debian equivalent, left out of this first cut:
 
 | os3 | Why not here |
@@ -146,7 +147,12 @@ packages that have no Debian equivalent, left out of this first cut:
 
 Each is additive — a repo, a keyring and a package name — so they can come back
 one at a time. `gh` and `glab` used to be on this list and are not any more:
-both are in trixie `main` and are installed.
+both are in trixie `main` and are installed. `claude-desktop` is the first one
+actually done the additive way, in `build/claude-desktop.sh`, and it is the
+pattern the rows above would follow: fetch the key, **pin its fingerprint**,
+write a deb822 entry, install the package. The pin is the part worth copying —
+a keyring baked into the image authorises root-owned packages on every host
+that boots it.
 
 ## Recommends are installed
 
