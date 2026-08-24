@@ -21,6 +21,11 @@ concurrency:
 env:
   REGISTRY: git.sebz.me
   IMAGE_NAME: ${{ github.repository }}
+  # Every registry client in this workflow reads its credentials from here.
+  # Not $HOME/.docker: the runner executes in host mode with HOME unset, so
+  # `${HOME}/.docker/config.json` under `set -u` aborts the step with
+  # "HOME: unbound variable". An explicit path removes the question.
+  DOCKER_CONFIG: /tmp/os4-docker-${{ github.run_id }}
 
 jobs:
   build:
@@ -112,6 +117,7 @@ jobs:
       - name: Log in to ${{ env.REGISTRY }}
         if: github.event_name != 'pull_request'
         run: |
+          mkdir -p "${DOCKER_CONFIG}"
           echo "${{ secrets.REGISTRY_TOKEN }}" \
             | docker login "${REGISTRY}" \
                 --username "${{ secrets.REGISTRY_USER }}" \
@@ -141,24 +147,31 @@ jobs:
         if: github.event_name != 'pull_request'
         run: |
           set -euo pipefail
+          # The runner snapshot carries skopeo (CI/scripts/provision-runner.sh).
+          # This installs it anyway, for a VM booted from a snapshot predating
+          # that change. Output is not swallowed: a silent apt failure here
+          # reads as "skopeo is required" below, which says nothing about why.
           if ! command -v skopeo >/dev/null 2>&1; then
             echo "skopeo not on the runner -- installing it."
             sudo=""
             [ "$(id -u)" -eq 0 ] || sudo=sudo
+            export DEBIAN_FRONTEND=noninteractive
             if command -v apt-get >/dev/null 2>&1; then
-              $sudo apt-get update -qq && $sudo apt-get install -y -qq skopeo
+              $sudo apt-get update -q || true
+              $sudo apt-get install -yq skopeo || true
             elif command -v dnf >/dev/null 2>&1; then
-              $sudo dnf install -y -q skopeo
+              $sudo dnf install -y skopeo || true
             fi
           fi
           if ! command -v skopeo >/dev/null 2>&1; then
             echo "skopeo is required: docker push cannot write OCI media types," >&2
             echo "and a schema 2 image in the registry cannot be installed by" >&2
-            echo "bootc. Install skopeo on the runner host." >&2
+            echo "bootc -- it dies looking for a config blob that does not" >&2
+            echo "exist. Add skopeo to the runner snapshot." >&2
             exit 1
           fi
 
-          auth="${HOME}/.docker/config.json"
+          auth="${DOCKER_CONFIG}/config.json"
           digestfile="$(mktemp)"
 
           set -- ${{ steps.meta.outputs.tags }}
