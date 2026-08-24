@@ -11,12 +11,13 @@
 # from source, and the second assembles the bootable root by hand before
 # installing the desktop on it.
 #
-# Almost everything installed comes from the Debian archive, the exceptions
-# being two vendor apt repositories -- Anthropic's, for the Claude desktop app,
+# Almost everything installed comes from the Debian archive. Three things do
+# not: two vendor apt repositories -- Anthropic's, for the Claude desktop app,
 # and Google's, for Chrome -- each with its signing key pinned to a fingerprint
-# the build refuses to proceed without. That still makes this smaller than os3:
-# a handful of things os3 gets from rpmfusion, other third-party repos or vendor
-# downloads are not here. README.md lists them.
+# the build refuses to proceed without, and Discord, which publishes no
+# repository at all and so has no key to pin. That still makes this smaller
+# than os3: a handful of things os3 gets from rpmfusion, other third-party
+# repos or vendor downloads are not here. README.md lists them.
 
 # --------------------------------------------------------------------------
 # Stage 1: bootc from source
@@ -276,6 +277,17 @@ RUN /tmp/build/claude-desktop.sh
 # the AppArmor profile at the path it will actually have. Same constraint as
 # every package step: it has to stay ahead of bootc-rootfs.sh.
 RUN /tmp/build/google-chrome.sh
+
+# Discord, from the vendor `.deb` -- no repository, so no signing key to pin,
+# which makes it the weakest of the three third-party installs and the one
+# README.md is most explicit about. The download is 2 MiB and contains no
+# Discord: the package is a launcher plus an updater bootstrap that fetches the
+# application into ~/.config/discord on first run, the same arrangement
+# Debian's steam-installer uses. Nothing of it lands in /opt, and its
+# self-updates land in $HOME rather than in a read-only /usr, so this is the
+# rare vendor package that needs no image-mode correction at all. Same
+# constraint as every package step: ahead of bootc-rootfs.sh.
+RUN /tmp/build/discord.sh
 
 RUN /tmp/build/initramfs.sh
 

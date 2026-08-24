@@ -247,15 +247,15 @@ desktops, and `power-profiles-daemon` is what powerdevil talks to.
 
 ## What os3 has that this does not
 
-Almost everything installed here comes from the Debian archive. There are two
-exceptions, both vendor apt repositories with a pinned signing key: Anthropic's,
-for the Claude desktop app, and Google's, for Chrome. These are the os3 packages
-that have no Debian equivalent, left out of this first cut:
+Almost everything installed here comes from the Debian archive. There are three
+exceptions. Two are vendor apt repositories with a pinned signing key —
+Anthropic's, for the Claude desktop app, and Google's, for Chrome — and the
+third is Discord, which publishes no repository, only a `.deb`. These are the
+os3 packages that have no Debian equivalent, left out of this first cut:
 
 | os3 | Why not here |
 | --- | --- |
 | rpmfusion codecs | No Debian equivalent for the DVD/BluRay side; `deb-multimedia` is the third-party option. Note that trixie's own `ffmpeg` already links `libx264` and `libx265`, so H.264/H.265 playback is not the gap this row once implied. |
-| `discord` | Vendor `.deb` download only. |
 | `gamescope` | Not packaged for Debian at all. `mangohud` is installed, and so is `steam` — see below. |
 | `tailscale` | `pkgs.tailscale.com` apt repo. |
 | `tea` | Gitea's CLI is a release binary. Debian ships a `tea` package, but it is an unrelated text editor, so the name is not usable. |
@@ -266,8 +266,8 @@ that have no Debian equivalent, left out of this first cut:
 
 Each is additive — a repo, a keyring and a package name — so they can come back
 one at a time. `gh` and `glab` used to be on this list and are not any more:
-both are in trixie `main` and are installed. `google-chrome-stable` and `steam`
-have come off it too; see below.
+both are in trixie `main` and are installed. `google-chrome-stable`, `steam` and
+`discord` have come off it too; see below.
 
 `claude-desktop` was the first row actually done the additive way, in
 `build/claude-desktop.sh`, and `google-chrome.sh` follows it: fetch the key,
@@ -381,6 +381,85 @@ asks for `nvidia-driver-libs:i386` only when it sees `/sys/module/nvidia` —
 which, during a container build, is the *build host's* `/sys`, and which the
 noninteractive frontend skips in any case. Layering the Nvidia stack on top is
 at least possible now that i386 is enabled; it is not attempted here.
+
+### Discord, and a `.deb` with nothing behind it
+
+Discord is the third third-party install, and the one that does not fit the
+pattern the other two established. There is no repository: what Discord
+publishes is a download endpoint,
+`https://discord.com/api/download?platform=linux&format=deb`, which 302s to the
+current release on `stable.dl2.discordapp.net`. So there is no signing key, and
+therefore no fingerprint to pin — the check `claude-desktop.sh` and
+`google-chrome.sh` both perform, and the one this README called the part worth
+copying, has no counterpart in `build/discord.sh`.
+
+What authenticates the download is TLS to `discord.com` and to the host the
+redirect names, and nothing else. That is worth stating rather than dressing
+up. The two assertions the script does make are sanity checks and not a
+substitute for a signature:
+
+- **The redirect has to land on Discord's own hosts.** `curl -L` follows
+  redirects across hosts, so an endpoint that one day points elsewhere would
+  have this image install a stranger's package as root without a word.
+  `-w '%{url_effective}'` reports where the chain actually ended, and anything
+  outside `discord.com` and `discordapp.net` fails the build.
+- **What came back has to be the package it claims to be** — `dpkg-deb -f`
+  reports `Package: discord`, or the build stops. This catches an error page
+  served with a 200 on it as much as anything else.
+
+#### The `.deb` does not contain Discord
+
+It is 2 MiB, and that is not a compression story. What the package ships is
+`/usr/bin/discord`, a 44-line shell script, and a 4 MiB
+`/usr/share/discord/updater_bootstrap`. On first launch the script looks for
+`~/.config/discord/Discord`, does not find it, and runs the bootstrap, which
+downloads the actual application from `updates.discord.com` into
+`~/.config/discord/app-<version>/` and execs it. Thereafter Discord updates
+itself in the same place.
+
+That is the same arrangement as Debian's `steam-installer`, described above:
+the packaged version is the version of the bootstrap, not of the program you
+end up running. It is also why the script pins neither a version nor a
+checksum. Doing so would break every scheduled build the moment Discord cut a
+release, in exchange for pinning a downloader that does not pin what it
+downloads.
+
+The consequence is worth being explicit about, because it differs from every
+other package in this image: **Discord does not arrive with `bootc upgrade`,
+and it is not in the image at all.** It arrives on first launch, per user,
+into `~/.config/discord` — which is under `/var/home`, so it is host state
+that survives image updates and is invisible to them.
+
+#### Which makes it the easiest vendor package here to ship read-only
+
+The three third-party installs, on what image mode actually asks of them:
+
+| | Trust anchor | Lands in `/opt` | Self-update target |
+| --- | --- | --- | --- |
+| `claude-desktop` | Anthropic's key, fingerprint pinned | No — `/usr/lib` | apt, so the image |
+| `google-chrome-stable` | Google's key, fingerprint pinned | 431 MiB, folded into `/usr/lib/opt`; AppArmor profile re-pointed, daily cron symlink removed | apt, so the image — but `/etc/cron.daily/google-chrome` would write to a read-only `/usr/share/keyrings` |
+| `discord` | TLS to `discord.com` | No | `$HOME`, which is writable |
+
+Nothing of Discord's goes to `/opt`, so there is no tree for `bootc-rootfs.sh`
+to fold and no path to re-point. Nothing writes to `/usr` after the install
+either — the self-updater's target is under `$HOME`, where Chrome's cron script
+and Valve's `bin_steamdeps.py` would both be reaching for a `/usr` that is not
+writable. It needs no image-mode correction at all, which none of the others
+managed.
+
+Two smaller things, neither of them a correction. Its AppArmor profile attaches
+to `@{HOME}/.config/discord/app-*/Discord`, which resolves to a path nothing on
+this image has unless `apparmor-home.sh` has extended `@{HOMEDIRS}` to cover
+`/var/home` — the same tunable `akonadi-server` needed, and the reason
+`discord.sh` runs before that step rather than after it. Like Chrome's, the
+profile is `flags=(unconfined)`
+and grants `userns`, so it is inert on Debian either way. And the `postinst`
+opens with `systemctl reload apparmor`, which in a build container with no
+running systemd prints `System has not been booted with systemd` and returns 1.
+The script is `/bin/sh` without `set -e` and ends on an `rm -f`, so dpkg sees
+exit 0 and the install succeeds; the profile is a conffile under
+`/etc/apparmor.d` and `apparmor.service` loads it at boot regardless. The line
+in the build log is noise, not a failure.
 
 ## Recommends are installed
 
