@@ -166,7 +166,7 @@ RUN apt-get install -y \
       xdg-user-dirs \
       fonts-dejavu fonts-liberation2 fonts-noto fonts-noto-color-emoji \
       cups cups-filters print-manager \
-      firefox-esr
+      speech-dispatcher firefox-esr
 
 # Media playback and the GPU stack. Narrower than os3's multimedia group by
 # necessity: Debian has no rpmfusion, and the patent-encumbered decoders os3
