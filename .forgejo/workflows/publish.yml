@@ -117,22 +117,89 @@ jobs:
                 --username "${{ secrets.REGISTRY_USER }}" \
                 --password-stdin
 
+      # Pushed with skopeo, not `docker push`, because the media types matter.
+      # docker push always writes a Docker schema 2 manifest and has no flag to
+      # do otherwise. bootc reads an image back out of containers-storage
+      # through skopeo's image proxy, which presents whatever is stored as OCI --
+      # and an OCI manifest needs an OCI config, re-encoded to a digest that
+      # storage never held a blob for. `bootc install` then dies before writing
+      # anything, asking for a config that does not exist:
+      #
+      #   failed to invoke method GetBlob: locating item named "sha256:1d7d..."
+      #   for image with ID "..." (consider removing the image to resolve the
+      #   issue): file does not exist
+      #
+      # Removing and re-pulling the image does not help: the digest is derived,
+      # so it comes back identical every time. `--format oci` is the fix, and it
+      # is why a locally built image (podman build defaults to OCI) installed
+      # fine while the published one never could.
+      #
+      # The first tag is streamed out of the docker daemon; the rest are copied
+      # registry-side off that one, so the layers upload once.
       - name: Push image
+        id: push
         if: github.event_name != 'pull_request'
         run: |
           set -euo pipefail
-          for t in ${{ steps.meta.outputs.tags }}; do
-            docker push "$t"
+          if ! command -v skopeo >/dev/null 2>&1; then
+            echo "skopeo not on the runner -- installing it."
+            sudo=""
+            [ "$(id -u)" -eq 0 ] || sudo=sudo
+            if command -v apt-get >/dev/null 2>&1; then
+              $sudo apt-get update -qq && $sudo apt-get install -y -qq skopeo
+            elif command -v dnf >/dev/null 2>&1; then
+              $sudo dnf install -y -q skopeo
+            fi
+          fi
+          if ! command -v skopeo >/dev/null 2>&1; then
+            echo "skopeo is required: docker push cannot write OCI media types," >&2
+            echo "and a schema 2 image in the registry cannot be installed by" >&2
+            echo "bootc. Install skopeo on the runner host." >&2
+            exit 1
+          fi
+
+          auth="${HOME}/.docker/config.json"
+          digestfile="$(mktemp)"
+
+          set -- ${{ steps.meta.outputs.tags }}
+          if [ "$#" -eq 0 ]; then
+            echo "No tags resolved for this event -- nothing to push."
+            exit 0
+          fi
+          first="$1"
+          shift
+
+          skopeo copy --format oci \
+            --dest-authfile "${auth}" \
+            --digestfile "${digestfile}" \
+            "docker-daemon:${first}" "docker://${first}"
+
+          for t in "$@"; do
+            skopeo copy --format oci \
+              --src-authfile "${auth}" --dest-authfile "${auth}" \
+              "docker://${first}" "docker://${t}"
           done
+
+          digest="$(cat "${digestfile}")"
+          echo "Pushed ${digest} as: ${first} $*"
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+          echo "image=${first%:*}" >> "$GITHUB_OUTPUT"
 
       # Keyless cosign is not available on Forgejo: it needs a Fulcio-trusted
       # OIDC issuer, which Forgejo Actions does not provide. Signing therefore
       # uses a key pair. Skipped automatically when COSIGN_PRIVATE_KEY is unset.
+      #
+      # Signed once, by digest, rather than once per tag: every tag resolves to
+      # the same manifest, so the old per-tag loop re-signed one digest N times.
+      # The digest now comes from the push step -- `docker inspect` reports what
+      # the local daemon holds, and the daemon is no longer what pushes.
       - name: Sign the published image
         if: github.event_name != 'pull_request'
         env:
           COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
           COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+          IMAGE: ${{ steps.push.outputs.image }}
+          DIGEST: ${{ steps.push.outputs.digest }}
         run: |
           set -euo pipefail
           if [ -z "${COSIGN_PRIVATE_KEY}" ]; then
@@ -143,10 +210,7 @@ jobs:
             echo "cosign not installed on the runner host -- skipping signing."
             exit 0
           fi
-          for t in ${{ steps.meta.outputs.tags }}; do
-            digest="$(docker inspect --format '{{ index .RepoDigests 0 }}' "$t")"
-            cosign sign --yes --key env://COSIGN_PRIVATE_KEY "${digest}"
-          done
+          cosign sign --yes --key env://COSIGN_PRIVATE_KEY "${IMAGE}@${DIGEST}"
 
       # The ephemeral server lives ~5 more minutes and may take the next job;
       # keep its disk clean but leave tagged layers as cache for a queued

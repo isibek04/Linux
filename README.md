@@ -193,7 +193,7 @@ bits survive.
 
 | Workflow | Trigger | Notes |
 | --- | --- | --- |
-| `publish.yml` | push to `main`, PRs, releases, every other day | Unchanged from os3. Builds on the `hetzner-host` runner with the host's docker, pushes to `git.sebz.me`, signs with cosign when `COSIGN_PRIVATE_KEY` is set. PRs build without pushing. |
+| `publish.yml` | push to `main`, PRs, releases, every other day | Builds on the `hetzner-host` runner with the host's docker, then pushes with `skopeo copy --format oci` — not `docker push`, see [OCI media types are not optional](#oci-media-types-are-not-optional). Signs the pushed digest with cosign when `COSIGN_PRIVATE_KEY` is set. PRs build without pushing. |
 | `build-disk.yml` | manual | os3's anaconda-ISO workflow, adapted. Anaconda is Fedora's installer and cannot install a Debian root, so this produces a qcow2 (or raw, or vmdk) disk image instead. Does not currently work — see [Installing to a disk](#installing-to-a-disk). |
 | `cleanup-packages.yml` | daily | Unchanged from os3 apart from the package name. |
 
@@ -220,6 +220,41 @@ It dies there every time, before writing any disk, and no bib flag disables the
 stage. The workflow needs either `selinux-policy-default` installed into the
 image or a manifest with that stage patched out before it produces anything.
 Until then it is kept for the record rather than because it works.
+
+### OCI media types are not optional
+
+`bootc install` reads the image out of the local container storage, through
+skopeo's image proxy. The proxy presents whatever is stored as OCI, and an OCI
+manifest needs an OCI config — so for an image stored as Docker schema 2, the
+proxy re-encodes the config and asks storage for a blob at the *new* digest.
+Storage only ever held the original. The install dies after formatting the
+disk and before writing a byte of it:
+
+```
+error: Installing to disk: Getting container info: failed to invoke method
+GetBlob: locating item named "sha256:1d7d2e562b06..." for image with ID
+"fb792ea47559..." (consider removing the image to resolve the issue):
+file does not exist
+```
+
+The message's own advice does not work. The digest is derived from the
+manifest, so `podman rmi` and a fresh pull reproduce it exactly. Nothing is
+corrupt; the request is for a blob that never existed.
+
+This is why a locally built image installed while the published one could not:
+`podman build` writes OCI manifests, `docker push` writes schema 2, and the
+Containerfile is the same either way. `publish.yml` now pushes with
+`skopeo copy --format oci`, so the published image is OCI from here on.
+
+For an image already in storage as schema 2, convert it on the way in and the
+image ID becomes the config digest bootc was asking for:
+
+```
+podman rmi git.sebz.me/sebastian/os4:main
+skopeo copy --format oci \
+  docker://git.sebz.me/sebastian/os4:main \
+  containers-storage:git.sebz.me/sebastian/os4:main
+```
 
 ### bootc install to-disk, with two flags that are not optional
 
