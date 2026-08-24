@@ -229,6 +229,14 @@ RUN /tmp/build/initramfs.sh
 
 RUN /tmp/build/enable-units.sh
 
+# The other half of the fact enable-units.sh teaches useradd: home is under
+# /var here, and AppArmor's @{HOME} has to be told so too. /home is a symlink
+# to /var/home and AppArmor matches the resolved path, so out of the box every
+# `owner @{HOME}/...` rule on this image names a path nothing has -- which is
+# why kmail could not start, akonadi-server's profile being an enforcing one.
+# See build/apparmor-home.sh.
+RUN /tmp/build/apparmor-home.sh
+
 # Everything above this line is an ordinary Debian root. This is the step that
 # makes it bootable -- and it empties /var, so nothing may install a package
 # after it.

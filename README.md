@@ -38,8 +38,9 @@ the Containerfile is the part os3 gets for free:
 | `build/initramfs.sh` | Puts the kernel and a dracut initramfs where bootc reads them, rather than in `/boot`. |
 | `build/enable-units.sh` | Enables the boot-time units, guarding the ones whose names differ between Debian releases. |
 | `build/bootc-rootfs.sh` | Turns the ordinary Debian root into the ostree/composefs layout. |
+| `build/apparmor-home.sh` | Teaches AppArmor's `@{HOME}` that home directories live under `/var`. |
 
-The base plumbing follows the bootcrew reference closely, with three departures
+The base plumbing follows the bootcrew reference closely, with four departures
 noted below.
 
 ### The dpkg database is moved into /usr
@@ -100,6 +101,48 @@ software have to be re-pointed at `/usr/lib/opt` if they are matched literally
 rather than followed — Chrome's AppArmor profile is the live example. And
 anything that expects to write inside its own `/opt` directory at runtime needs
 that subdirectory symlinked into `/var`; nothing in this image does yet.
+
+### AppArmor has to be told where home is
+
+`/home` is a symlink to `/var/home` and `/root` one to `/var/roothome`, which is
+the ostree layout and not negotiable. AppArmor matches the path a process
+actually resolves to rather than the symlink it typed — the same rule that makes
+`google-chrome.sh` re-point Chrome's profile at `/usr/lib/opt` — and every
+profile in the archive names a user's files through `@{HOME}`, which
+apparmor's `tunables/home` builds out of `@{HOMEDIRS}`, which is `/home/` and
+nothing else.
+
+So on an untreated image every `owner @{HOME}/...` rule matches a path that no
+process here ever has, and a confined application is denied its own files.
+`build/apparmor-home.sh` appends `/var/home/` and `/var/roothome/` through
+`tunables/home.d`, apparmor's own extension point for exactly this.
+
+os3 never had to think about it. Fedora is on SELinux, which decides on the
+label a file carries rather than on the path an access names, and the
+`fedora-bootc` base ships the same `/home` → `/var/home` layout already
+labelled. Here the layout is assembled by hand, and the policy that comes with
+the archive was written for the layout Debian normally has.
+
+The bug this fixes is worth describing, because nothing about it points at
+AppArmor. `kde-standard` installs KDE PIM, `akonadi-server` ships an *enforcing*
+profile, and kmail stores everything through akonadi. Without the tunable the
+server cannot create its SQLite database, crashes on startup, is restarted
+twice, and gives up — reporting:
+
+```
+Cannot remove old log file '~/.local/share/akonadi/Akonadi.error.old': Permission denied
+KCrash: Application 'akonadiserver' crashing...
+org.kde.pim.akonadicontrol: Application '/usr/bin/akonadiserver' crashed too often. Giving up!
+```
+
+against a directory the invoking user owns outright, mode 775. AppArmor writes
+its denials to the audit log and never to the application, so the only thing
+visible is a permission error that the permissions plainly allow. `dmesg` is
+where the answer is, and the mail client is not what makes anyone look there.
+
+It is also not only kmail. `@{HOME}` is in nearly every profile the archive
+ships, so this is the one line that keeps every confined desktop application on
+this image able to read the home directory it was pointed at.
 
 ## The desktop is KDE Plasma
 
