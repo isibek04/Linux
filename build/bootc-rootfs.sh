@@ -6,7 +6,8 @@
 #   1. The dpkg database moves out of /var into /usr, because step 3 empties
 #      /var and the package database must survive.
 #   2. The /var tree the packages just built is transcribed into tmpfiles.d
-#      entries, so it can be recreated at boot.
+#      entries, so it can be recreated at boot -- directories and symlinks as
+#      themselves, package-shipped files through /usr/share/factory.
 #   3. /var and the other state directories are emptied and replaced with
 #      symlinks into /var, which is what ostree expects to find. /opt is the
 #      one that does not go to /var: it is image content, so it moves to
@@ -54,13 +55,67 @@ rm -rf /var/lib/apt/lists/* /var/log/apt/* /var/cache/debconf/*-old
 # every package rather than the one that was noticed, and it reads the real
 # modes and owners instead of hardcoding names that differ between Debian and
 # Fedora (libvirt-qemu vs qemu, for one).
+# Directories and symlinks can be described in place. Regular files cannot:
+# a tmpfiles entry can create an empty file but not fill one, so a file a
+# package shipped under /var needs its content kept somewhere that survives
+# step 3. That is what /usr/share/factory is for -- systemd-tmpfiles' `C`
+# resolves a bare argument to /usr/share/factory/<path> -- so the content
+# moves under /usr with everything else and `C` copies it back at boot.
+#
+# Without this the files are simply gone, and not only on the upgrade path:
+# step 3 empties the /var that ships *in the image*, so a fresh
+# `bootc install` has nothing to materialise either. `bootc container lint`
+# does not catch it; its var-tmpfiles check looks at directories.
+#
+# The set is small, and most of what dpkg lists under /var is not affected:
+# of ~350 .list entries on a desktop root, ~228 are symlinks (all of
+# /var/lib/ghostscript/CMap points into /usr/share/poppler) and ~100 are
+# directories, both already covered below. What was being lost is the couple of
+# dozen regular files left over -- the hunspell dispatch tables under
+# /var/lib/dictionaries-common, which is how hunspell dictionaries are found;
+# usb.ids; /var/lib/xkb's compiled-cache marker; tex-common's fmtutil and
+# font-map fragments. A few hundred KiB, and silently absent before this. Worth
+# it at that size because the failure mode is a file that is simply not there,
+# on a system with no `apt install --reinstall` to put it back -- and because
+# the file case is now covered for whatever gets added to the Containerfile
+# later, rather than being correct by accident for today's package list.
+#
+# Which files count is asked of dpkg rather than guessed from the tree. A .list
+# entry is content some package installed, which is exactly what has to
+# survive; build residue -- apt's lists, dpkg's own logs, /var/backups -- is
+# owned by no package and is skipped without needing a list of exceptions.
+factory=/usr/share/factory
+clines="$(mktemp)"
+paths="$(mktemp)"
+trap 'rm -f "${clines}" "${paths}"' EXIT
+
+while IFS= read -r p; do
+  # -f and not -L: a symlink to a file is already covered as a symlink below,
+  # and copying through it would duplicate the target into the factory tree.
+  [ -L "${p}" ] && continue
+  [ -f "${p}" ] || continue
+  read -r mode owner group < <(stat -c '%04a %U %G' "${p}")
+  printf 'C %s %s %s %s -\n' "${p}" "${mode}" "${owner}" "${group}" >> "${clines}"
+  printf '%s\0' "${p#/}" >> "${paths}"
+done < <(cat /usr/lib/sysimage/dpkg/info/*.list 2>/dev/null | grep '^/var/.' | sort -u)
+
+if [ -s "${paths}" ]; then
+  install -d "${factory}"
+  # Relative paths with cwd=/ so --parents rebuilds var/lib/... under the
+  # factory root; -a to carry modes, owners and timestamps across.
+  ( cd / && xargs -0 -a "${paths}" cp -a --parents -t "${factory}" )
+fi
+
 out=/usr/lib/tmpfiles.d/zz-os4-var.conf
 {
   cat <<'EOF'
 # Generated during the image build by build/bootc-rootfs.sh -- do not edit.
-# One entry per directory and symlink that the packages in the Containerfile
-# created under /var, so that `bootc upgrade` onto an existing host recreates
-# what that host has never seen. Modes and owners are read from the built tree.
+# One entry per directory, symlink and package-shipped file that the packages
+# in the Containerfile created under /var, so that `bootc upgrade` onto an
+# existing host recreates what that host has never seen. Modes and owners are
+# read from the built tree. The `C` entries copy from /usr/share/factory/var,
+# where the build put the content; `C` leaves an existing destination alone, so
+# a file a host has since edited is not overwritten.
 EOF
   # Directories, shallowest first, so a parent's mode is applied before the
   # children that systemd-tmpfiles would otherwise create it for implicitly.
@@ -69,8 +124,10 @@ EOF
   # Symlinks: /var/lock and /var/run point into /run, and /var/lib/dpkg now
   # points at the copy under /usr.
   find /var -mindepth 1 -type l -printf 'L %p - - - - %l\n'
+  cat "${clines}"
 } > "${out}"
-echo "Wrote $(grep -c '^[dL]' "${out}") tmpfiles.d entries to ${out}"
+echo "Wrote $(grep -c '^d ' "${out}") directory, $(grep -c '^L ' "${out}") symlink" \
+     "and $(grep -c '^C ' "${out}") file entries to ${out}"
 
 # --------------------------------------------------------------------------
 # 3. Empty the state directories and link them into /var (except /opt)

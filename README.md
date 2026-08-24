@@ -32,7 +32,7 @@ the Containerfile is the part os3 gets for free:
 
 | Step | What it does |
 | --- | --- |
-| `build/bootc-build.sh` | Builds `bootc` from a tagged upstream release in a Rust builder stage. |
+| `build/bootc-build.sh` | Builds `bootc` from a tagged upstream release in a Rust builder stage. The tag is pinned in the Containerfile's `BOOTC_REF`, not resolved at build time: `publish.yml` builds on a timer, and the boot path is not something an unattended build should be free to change. |
 | `build/apt-sources.sh` | Enables `contrib` and `non-free-firmware` alongside `main`. |
 | `build/dracut-config.sh` | Configures dracut before a kernel exists to trigger it — Debian's default generator, initramfs-tools, has no ostree support. |
 | `build/initramfs.sh` | Puts the kernel and a dracut initramfs where bootc reads them, rather than in `/boot`. |
@@ -70,6 +70,51 @@ packages actually built and transcribes every directory and symlink into
 rather than the remembered one, and it reads the real modes and owners off the
 tree instead of hardcoding names that differ between the distributions —
 Debian's libvirt runs as `libvirt-qemu`, Fedora's as `qemu`.
+
+#### Files, not just directories
+
+Directories and symlinks describe themselves in tmpfiles. Regular files do not:
+an entry can create an empty file but not fill one. So a *file* a package
+shipped under `/var` needs its content kept somewhere that survives the step
+that empties `/var`, and the generator above transcribed neither the file nor
+its content — it emitted nothing at all for them.
+
+Missing this is worse than the upgrade-path problem the generator was written
+for, because it is not confined to the upgrade path. `bootc-rootfs.sh` empties
+the `/var` that ships **in the image**, so on a fresh `bootc install` there is
+nothing left for bootc to materialise either. `bootc container lint` does not
+catch it; its `var-tmpfiles` check is about directories.
+
+So those files now move to `/usr/share/factory/var`, alongside everything else
+that goes under `/usr`, and the generator emits systemd-tmpfiles `C` entries —
+whose bare argument resolves to exactly that path. `C` copies only when the
+destination does not exist, so a file a host has since edited is left alone.
+
+Which files count is asked of dpkg rather than read off the tree. A `.list`
+entry is content some package installed, which is precisely what has to
+survive; build residue — apt's package lists, dpkg's own logs, `/var/backups` —
+belongs to no package and is skipped without needing a list of exceptions to
+maintain.
+
+The set is small, and worth being accurate about, because most of what dpkg
+lists under `/var` is *not* affected. Of ~350 `.list` entries under `/var` on a
+desktop root, around 228 are symlinks — `/var/lib/ghostscript/CMap/*` points
+into `/usr/share/poppler`, and every one of those was already covered by the
+`L` entries — and about 100 are directories, covered by the `d` entries. What
+was actually being lost is the couple of dozen regular files left over: the
+hunspell dispatch tables under `/var/lib/dictionaries-common`, which is how
+hunspell dictionaries are found at all, `usb.ids`, `/var/lib/xkb`'s compiled
+cache marker, `tex-common`'s `fmtutil` and font-map fragments on an image that
+installs TeX. Two hundred-odd KiB of content, and every one of them silently
+absent before this.
+
+It is worth fixing at that size anyway. The cost is a few hundred KiB under
+`/usr` and no build-time complexity, and the failure mode is the expensive kind
+— a file that is simply not there, on a system where `apt install --reinstall`
+is not available to put it back. It also stops being a question of which
+packages happen to be in the Containerfile today: the generator now covers the
+file case for whatever gets added later, rather than being correct by accident
+for the current package list.
 
 ### /opt is image content, not host state
 
