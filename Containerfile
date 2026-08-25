@@ -386,23 +386,21 @@ CMD ["/sbin/init"]
 # tags exist for fresh installs, until composefs is what the machines run.
 #
 # The split: the kernel and initramfs move out of the rootfs and into the UKI,
-# so shipping them twice would only cost space. This also orders the
-# chicken-and-egg correctly -- the composefs digest is computed over the split
-# rootfs, *before* the UKI (which embeds that digest) is copied into /boot;
-# /boot belongs to the deployment, not the measured image, which is why the
-# copy in the final stage does not invalidate the digest it contains.
-# /boot/EFI/Linux is created here, ahead of the digest, not by the final
-# stage's COPY. Measured empirically against this rootfs (bootc v1.16.9):
-# the digest transform extracts *files* under /boot as unmeasured boot
-# resources, but the *directories* stay in the measured tree -- so the
-# split rootfs the digest is computed over must already hold the directory
-# chain the COPY would otherwise create, or the digest embedded in the UKI
-# can never match the one the installer computes from the final image.
-# (Directory mtimes are normalized, so the COPY adding the UKI to the
-# existing directory does not shift the digest again.)
+# so shipping them twice would only cost space.
+#
+# The chicken-and-egg -- a UKI that embeds the digest of a tree it is then
+# copied into -- is resolved by /boot belonging to the deployment rather than
+# to the measured image. Nothing under /boot has to exist before the digest is
+# computed, and nothing written there afterwards can move it: composefs empties
+# /boot and /sysroot outright before hashing -- transform_for_boot() calls
+# clear() on both and resets /boot's mtime from /usr's -- so files *and*
+# directories underneath them are outside the measured tree. Both directories
+# do have to exist, or the transform errors; bootc-rootfs.sh creates them. The
+# final stage's COPY creates the EFI/Linux chain under /boot.
+# Verified against bootc v1.16.9 by hashing two images differing only in
+# whether that COPY had to create the directory chain: same digest either way.
 FROM rootfs AS split
-RUN mkdir /kernel && bootc container split-kernel-and-rootfs --rootfs / --output /kernel \
- && mkdir -p /boot/EFI/Linux
+RUN mkdir /kernel && bootc container split-kernel-and-rootfs --rootfs / --output /kernel
 
 # The tools stage. FROM builder rather than a fresh Debian: the bootc binary
 # it built is at /output/usr/bin/bootc and the libostree it links against is
