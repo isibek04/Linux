@@ -74,7 +74,7 @@ RUN /tmp/build/bootc-build.sh
 # --------------------------------------------------------------------------
 # Stage 2: the image
 # --------------------------------------------------------------------------
-FROM docker.io/library/debian:trixie
+FROM docker.io/library/debian:trixie AS rootfs
 
 # ARG rather than ENV: apt must not prompt during the build, but the deployed
 # system should not inherit a noninteractive frontend.
@@ -366,3 +366,75 @@ LABEL containers.bootc="1" \
 # the default entrypoint running under systemd.
 STOPSIGNAL SIGRTMIN+3
 CMD ["/sbin/init"]
+
+# --------------------------------------------------------------------------
+# Stages 3-5: the sealed variant
+# --------------------------------------------------------------------------
+# A second image built from the same rootfs, published as the `-sealed` tags:
+# kernel, initramfs and kernel arguments fused into one UKI, signed with the
+# leaf key of usr/share/os4/secureboot, with the composefs digest of the whole
+# root filesystem embedded in the cmdline. bootc's composefs backend
+# (experimental in the pinned v1.16.9) verifies that digest at boot, so the
+# signature on the UKI seals everything from firmware to /usr.
+#
+# A separate variant rather than a change to the main image, and the reason is
+# the deployed hosts: an image containing a UKI makes `bootc install` select
+# the composefs backend automatically, and the split rootfs below no longer
+# carries vmlinuz/initramfs.img under /usr/lib/modules -- which is exactly
+# where the ostree backend on every existing machine looks during
+# `bootc upgrade`. The main tags therefore stay as they are, and the sealed
+# tags exist for fresh installs, until composefs is what the machines run.
+#
+# The split: the kernel and initramfs move out of the rootfs and into the UKI,
+# so shipping them twice would only cost space. This also orders the
+# chicken-and-egg correctly -- the composefs digest is computed over the split
+# rootfs, *before* the UKI (which embeds that digest) is copied into /boot;
+# /boot belongs to the deployment, not the measured image, which is why the
+# copy in the final stage does not invalidate the digest it contains.
+# /boot/EFI/Linux is created here, ahead of the digest, not by the final
+# stage's COPY. Measured empirically against this rootfs (bootc v1.16.9):
+# the digest transform extracts *files* under /boot as unmeasured boot
+# resources, but the *directories* stay in the measured tree -- so the
+# split rootfs the digest is computed over must already hold the directory
+# chain the COPY would otherwise create, or the digest embedded in the UKI
+# can never match the one the installer computes from the final image.
+# (Directory mtimes are normalized, so the COPY adding the UKI to the
+# existing directory does not shift the digest again.)
+FROM rootfs AS split
+RUN mkdir /kernel && bootc container split-kernel-and-rootfs --rootfs / --output /kernel \
+ && mkdir -p /boot/EFI/Linux
+
+# The tools stage. FROM builder rather than a fresh Debian: the bootc binary
+# it built is at /output/usr/bin/bootc and the libostree it links against is
+# already installed there. Nothing in this stage ships -- only /out, the one
+# signed UKI, is copied into the final stage.
+#
+# The leaf private key arrives as a BuildKit secret, mounted for the one RUN
+# and never written to a layer; both certificates are read from the split
+# rootfs itself, where the repo commits them. Signing is a plain sbsign call
+# rather than ukify's --secureboot-* options because shim verifies the leaf
+# by walking the chain up to the MOK-enrolled CA, and embedding that chain
+# (sbsign --addcert) is the part ukify cannot express. Details in the script.
+FROM builder AS uki
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      sbsigntool systemd-boot-efi systemd-ukify \
+ && rm -rf /var/lib/apt/lists/*
+COPY build/uki-build.sh /tmp/build/
+RUN --mount=type=bind,from=split,target=/target \
+    --mount=type=bind,from=split,source=/kernel,target=/kernel \
+    --mount=type=secret,id=sb_leaf_key \
+    /tmp/build/uki-build.sh
+
+# The sealed image: the split rootfs plus its signed UKI, at the path bootc's
+# composefs install reads UKIs from. Labels, STOPSIGNAL and CMD are inherited
+# from the rootfs stage through FROM, so nothing repeats here.
+FROM split AS sealed
+COPY --from=uki /out/ /boot/EFI/Linux/
+
+# Default target: the classic image. Stages build in dependency order but a
+# bare `docker build` produces the *last* stage, which the sealed chain above
+# would otherwise have silently changed to an image that cannot upgrade an
+# ostree host -- and whose build fails without the signing secret besides.
+# This empty re-alias puts the default back. CI is explicit on both sides:
+# --target rootfs for the main tags, --target sealed for the -sealed ones.
+FROM rootfs

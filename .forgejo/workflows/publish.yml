@@ -97,6 +97,17 @@ jobs:
           echo "tags=${tags}" >> "$GITHUB_OUTPUT"
           echo "Resolved tags: ${tags}"
 
+          # The sealed variant mirrors every tag with a -sealed suffix:
+          # main-sealed, pr-N-sealed, X.Y.Z-sealed. Same repository, so the
+          # two variants share layers in the registry.
+          sealed=""
+          for t in ${tags}; do
+            sealed="${sealed} ${t}-sealed"
+          done
+          sealed="$(echo ${sealed} | xargs)"
+          echo "sealed_tags=${sealed}" >> "$GITHUB_OUTPUT"
+          echo "Resolved sealed tags: ${sealed}"
+
       - name: Build image
         run: |
           set -euo pipefail
@@ -107,11 +118,50 @@ jobs:
           done
           docker build \
             --pull \
+            --target rootfs \
             --label "org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}" \
             --label "org.opencontainers.image.revision=${{ github.sha }}" \
             ${args} \
             --file Containerfile \
             .
+
+      # The sealed variant: same rootfs, with kernel, initramfs and kargs
+      # fused into a UKI signed by the Secure Boot leaf key
+      # (usr/share/os4/secureboot -- the certificates are in the repo, only
+      # the key is a secret). It reuses every layer the build above just
+      # made, so this is the split + ukify + sbsign stages on top.
+      #
+      # The key crosses into the build as a BuildKit secret, mounted for one
+      # RUN and absent from every layer. Skipped when SB_LEAF_KEY is unset,
+      # the same arrangement signing has with COSIGN_PRIVATE_KEY --
+      # secrets-in-if is not expression-safe, so the emptiness check lives in
+      # the script and later steps key off the `built` output.
+      - name: Build sealed image
+        id: sealed
+        env:
+          SB_LEAF_KEY: ${{ secrets.SB_LEAF_KEY }}
+          DOCKER_BUILDKIT: '1'
+        run: |
+          set -euo pipefail
+          if [ -z "${SB_LEAF_KEY}" ]; then
+            echo "SB_LEAF_KEY not set -- skipping the sealed variant."
+            echo "built=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          cd src
+          args=""
+          for t in ${{ steps.meta.outputs.sealed_tags }}; do
+            args="${args} --tag ${t}"
+          done
+          docker build \
+            --target sealed \
+            --secret id=sb_leaf_key,env=SB_LEAF_KEY \
+            --label "org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}" \
+            --label "org.opencontainers.image.revision=${{ github.sha }}" \
+            ${args} \
+            --file Containerfile \
+            .
+          echo "built=true" >> "$GITHUB_OUTPUT"
 
       # PRs build only -- no push, matching the GitHub workflow's behaviour.
       - name: Log in to ${{ env.REGISTRY }}
@@ -198,6 +248,39 @@ jobs:
           echo "digest=${digest}" >> "$GITHUB_OUTPUT"
           echo "image=${first%:*}" >> "$GITHUB_OUTPUT"
 
+      # Same push, for the sealed variant. skopeo is guaranteed by the step
+      # above -- it installed the tool or failed the job.
+      - name: Push sealed image
+        id: push_sealed
+        if: github.event_name != 'pull_request' && steps.sealed.outputs.built == 'true'
+        run: |
+          set -euo pipefail
+          auth="${DOCKER_CONFIG}/config.json"
+          digestfile="$(mktemp)"
+
+          set -- ${{ steps.meta.outputs.sealed_tags }}
+          if [ "$#" -eq 0 ]; then
+            echo "No sealed tags resolved for this event -- nothing to push."
+            exit 0
+          fi
+          first="$1"
+          shift
+
+          skopeo copy --format oci \
+            --dest-authfile "${auth}" \
+            --digestfile "${digestfile}" \
+            "docker-daemon:${first}" "docker://${first}"
+
+          for t in "$@"; do
+            skopeo copy --format oci \
+              --src-authfile "${auth}" --dest-authfile "${auth}" \
+              "docker://${first}" "docker://${t}"
+          done
+
+          digest="$(cat "${digestfile}")"
+          echo "Pushed ${digest} as: ${first} $*"
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+
       # Keyless cosign is not available on Forgejo: it needs a Fulcio-trusted
       # OIDC issuer, which Forgejo Actions does not provide. Signing therefore
       # uses a key pair. Skipped automatically when COSIGN_PRIVATE_KEY is unset.
@@ -213,6 +296,9 @@ jobs:
           COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
           IMAGE: ${{ steps.push.outputs.image }}
           DIGEST: ${{ steps.push.outputs.digest }}
+          # Empty when the sealed variant was skipped or not pushed; the same
+          # image repository either way, so IMAGE serves both.
+          DIGEST_SEALED: ${{ steps.push_sealed.outputs.digest }}
         run: |
           set -euo pipefail
           if [ -z "${COSIGN_PRIVATE_KEY}" ]; then
@@ -224,6 +310,9 @@ jobs:
             exit 0
           fi
           cosign sign --yes --key env://COSIGN_PRIVATE_KEY "${IMAGE}@${DIGEST}"
+          if [ -n "${DIGEST_SEALED}" ]; then
+            cosign sign --yes --key env://COSIGN_PRIVATE_KEY "${IMAGE}@${DIGEST_SEALED}"
+          fi
 
       # The ephemeral server lives ~5 more minutes and may take the next job;
       # keep its disk clean but leave tagged layers as cache for a queued
