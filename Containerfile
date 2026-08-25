@@ -99,9 +99,35 @@ RUN /tmp/build/dracut-config.sh
 # Recommends are left on here, as everywhere below. On this line in particular
 # that is what brings in intel-microcode and amd64-microcode (recommended by
 # firmware-linux), the GPU firmware firmware-misc-nonfree recommends, and
-# shim-signed. dracut Conflicts: initramfs-tools, so the microcode packages'
-# recommend on initramfs-tools is dropped rather than fighting the generator
-# this image actually uses.
+# efibootmgr and mokutil (recommended and depended on by systemd-boot).
+# dracut Conflicts: initramfs-tools, so the microcode packages' recommend on
+# initramfs-tools is dropped rather than fighting the generator this image
+# actually uses.
+#
+# The two signed-EFI packages are what make Secure Boot possible, and both are
+# named rather than left to apt.
+#
+# `shim-signed` is only a systemd-boot *recommend*, so it arrives either way
+# today -- but it is the Microsoft-signed binary the whole chain starts from,
+# which is not something to hold on a recommend. It pulls
+# shim-helpers-amd64-signed (MokManager and the fallback loader) as a hard
+# dependency.
+#
+# `systemd-boot-efi-amd64-signed` has to be named because otherwise it is not
+# installed at all. systemd-boot declares
+# `systemd-boot-efi-signed | systemd-boot-efi` and the signed alternative is
+# listed first, but naming systemd-boot-efi explicitly on this line satisfies
+# the dependency directly, so apt never considers the alternative. The result
+# is an image whose /usr/lib/systemd/boot/efi holds only the unsigned
+# systemd-bootx64.efi -- which is what the README used to describe as Debian
+# not shipping a signed one at all.
+#
+# With it installed, `bootctl install` picks the signed binary on its own:
+# install_binaries() skips a `.efi` when a `.efi.signed` sits beside it, and
+# copy_one_file() drops the suffix at the destination (systemd 257,
+# src/bootctl/bootctl-install.c). bootc calls plain `bootctl install`
+# (crates/lib/src/bootloader.rs, bootc 1.16.9), so it inherits that behaviour
+# without knowing anything about it.
 #
 # The wifi, bluetooth and audio-DSP blobs have to be named explicitly, though.
 # Fedora has one linux-firmware package and os3 gets the lot without asking;
@@ -131,7 +157,8 @@ RUN /tmp/build/dracut-config.sh
 RUN apt-get install -y \
       dracut \
       ostree \
-      systemd-boot systemd-boot-efi \
+      systemd-boot systemd-boot-efi systemd-boot-efi-amd64-signed \
+      shim-signed \
       systemd-resolved systemd-timesyncd \
       libnss-myhostname libnss-resolve \
       firmware-linux-free firmware-linux \

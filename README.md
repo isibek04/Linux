@@ -567,10 +567,15 @@ Stage 2 installs with apt's recommends left on, everywhere. Debian's
 `--no-install-recommends` habit comes from servers, where a lean root is the
 point; this image is a desktop, and a good deal of what makes one work is
 recommended rather than depended on. Concretely, leaving them on is what brings
-in `intel-microcode` and `amd64-microcode`, the GPU firmware, `shim-signed`,
+in `intel-microcode` and `amd64-microcode`, the GPU firmware, `efibootmgr`,
 podman's rootless networking (`passt`, `slirp4netns`, `aardvark-dns`),
 virt-manager's SPICE console and qemu's display modules — every one of which
 had to be noticed and added by hand otherwise.
+
+`shim-signed` used to be on that list. It is still a recommend — of
+`systemd-boot`, not of `firmware-linux` — but it is now named explicitly in the
+Containerfile, because it is the Microsoft-signed binary the whole Secure Boot
+chain starts from and that is not a thing to leave to a recommend.
 
 It costs roughly 180 packages and 700 MiB of installed size against the old
 flag-everywhere build, the bulk of it a C toolchain reached through
@@ -762,9 +767,105 @@ needs `/var/home` created first, since tmpfiles only makes it at boot and
 `/home` is a symlink into a `/var` the image ships empty.
 
 UEFI is required: the image installs systemd-boot and no BIOS bootloader.
-Secure Boot has to be off — `/usr/lib/systemd/boot/efi/` holds only the
-unsigned `systemd-bootx64.efi`, with no signed counterpart for `shim-signed` to
-chainload.
+
+## Secure Boot
+
+It works, with Debian's signatures and nobody's own keys. Two packages and one
+boot-time service, and none of it needs a key generated or a certificate
+enrolled.
+
+The chain is the ordinary distro one:
+
+```
+firmware --db--> shim --Debian CA--> systemd-boot --shim_lock--> kernel
+```
+
+Firmware trusts Microsoft, Microsoft signed shim, shim carries Debian's CA
+inside itself, and Debian signed both systemd-boot and the kernel with it. Note
+that `linux-image-amd64` already resolves to the *signed* kernel — the unsigned
+build is the one carrying an explicit `-unsigned` suffix in the archive — so
+copying `/boot/vmlinuz-$kver` into the module directory in
+`build/initramfs.sh` carries a valid signature with it. Nothing here re-signs a
+kernel, because there is nothing to gain by doing so.
+
+Debian's shim is dual-signed, by the `Microsoft Corporation UEFI CA 2011` and
+the `Microsoft UEFI CA 2023`, so it boots on firmware from either side of the
+CA rollover.
+
+### The package that was missing
+
+`systemd-boot` declares `systemd-boot-efi-signed | systemd-boot-efi`, signed
+alternative first — but the Containerfile names `systemd-boot-efi` explicitly,
+which satisfies the dependency directly and stops apt ever reaching for the
+alternative. That is the whole reason this image used to have no signed
+bootloader, and why the README used to claim Debian shipped none.
+`systemd-boot-efi-amd64-signed` is now named alongside it.
+
+Nothing else was needed to make bootc use it: `bootctl install` skips a `.efi`
+when a `.efi.signed` sits beside it and drops the suffix at the destination
+(systemd 257, `src/bootctl/bootctl-install.c`), and bootc calls plain
+`bootctl install` (`crates/lib/src/bootloader.rs`, bootc 1.16.9).
+
+### The part bootc does not do
+
+`bootctl` knows nothing about shim. It writes systemd-boot to
+`EFI/systemd/systemd-bootx64.efi` and to the removable-media path
+`EFI/BOOT/BOOTX64.EFI`, and stops — and Debian's CA is not in any firmware's
+db, so with Secure Boot on the firmware refuses both.
+
+`usr/libexec/os4-secureboot-esp` inserts the missing link, from
+`os4-secureboot-esp.service` on every boot. It leaves `EFI/systemd` alone — a
+fine unsigned-chain bootloader for a machine with Secure Boot off — and builds
+the chain in `EFI/BOOT`:
+
+| file | content | signed by |
+| --- | --- | --- |
+| `BOOTX64.EFI` | `shimx64.efi.signed` | Microsoft (2011 + 2023) |
+| `grubx64.efi` | `systemd-bootx64.efi.signed` | Debian Secure Boot CA |
+| `mmx64.efi` | `mmx64.efi.signed` | Debian Secure Boot CA |
+
+`grubx64.efi` is not a typo and there is no GRUB in this image. Debian's shim
+has its second stage fixed at build time to the string `\grubx64.efi`, resolved
+relative to shim's own directory; renaming the file is how you point shim at a
+different loader without rebuilding it. `fbx64.efi` is deliberately not copied:
+it is shim's NVRAM-entry builder, it needs a `BOOT<arch>.CSV` this image does
+not ship, and shim only invokes it when it finds it alongside — so leaving it
+out is what sends shim straight to its second stage.
+
+`EFI/BOOT` and not `EFI/systemd` because it is the UEFI removable-media path,
+which is what fires when there is no NVRAM entry at all — the
+bootc-image-builder case, where `--generic-image` implies `--no-variables`.
+
+It has to run on the deployed host rather than in the build: the ESP does not
+exist until something installs the image to a disk, and neither
+`bootc install to-disk` nor bootc-image-builder offers a hook between laying
+the bootloader down and finishing. It is idempotent, which is also what makes
+it the repair path if anything ever re-runs `bootctl install`.
+
+The first boot after an install is still a Secure-Boot-off boot — the chain is
+not on the ESP until the service has run once. Turn Secure Boot on at the
+second boot.
+
+### What this does and does not cover
+
+It covers the bootloader and the kernel. It does not cover the initramfs, and
+more to the point it does not cover the kernel command line — which is where
+bootc puts `composefs=<digest>`, the verity digest the whole read-only `/usr`
+hangs from (`cmdline_options.extend`, `crates/lib/src/bootc_composefs/boot.rs`).
+In the BLS layout that digest lives in a plain-text entry on an unsigned FAT
+partition.
+
+Closing that means UKIs, which means a signing key of one's own, because nobody
+else will sign an initramfs built here. bootc's composefs backend supports
+Type 2 entries, but on terms worth knowing before starting: the UKI must live
+in `/boot/EFI/Linux` rather than `/usr/lib/modules`, because `/boot` is the only
+tree composefs empties before computing the digest the UKI has to embed
+(`REQUIRED_TOPLEVEL_TO_EMPTY_DIRS`, composefs-rs `composefs-boot/src/lib.rs`) —
+so the build becomes two-pass. And `setup_composefs_uki_boot` never reads
+`root_setup.kargs`, which is what carries `rd.luks.uuid=` and
+`luks.options=` in the BLS path, so UKI and `--block-setup tpm2-luks` look
+mutually exclusive as of bootc 1.16.9. Untested here; test it in a VM before
+believing either half.
 
 ## Updates
 

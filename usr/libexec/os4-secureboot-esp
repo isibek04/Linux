@@ -1,0 +1,198 @@
+#!/usr/bin/env bash
+# Put shim in front of systemd-boot on the ESP, so the machine can boot with
+# Secure Boot enabled.
+#
+# Debian signs systemd-boot with its own CA, and that CA is not in any
+# firmware's db -- it lives inside shim, which is the binary Microsoft signs.
+# So the chain has to be
+#
+#   firmware --db--> shim --embedded Debian CA--> systemd-boot --> kernel
+#
+# and `bootctl install` knows nothing about shim. It writes the signed
+# systemd-boot to both EFI/systemd/systemd-bootx64.efi and the removable-media
+# path EFI/BOOT/BOOTX64.EFI, and stops (systemd 257,
+# src/bootctl/bootctl-install.c: copy_one_file() mirrors into EFI/BOOT only for
+# names starting with "systemd-boot"). Firmware with Secure Boot on then
+# refuses both, because neither is signed by anything it trusts.
+#
+# This script inserts the missing link. It cannot be done at build time: the
+# ESP does not exist until something installs the image to a disk, and neither
+# `bootc install to-disk` nor bootc-image-builder offers a hook between laying
+# down the bootloader and finishing. So it runs on the deployed host, from
+# os4-secureboot-esp.service, on every boot -- it is idempotent, and running it
+# again is also what repairs the ESP if anything ever re-runs `bootctl`.
+#
+# The layout it produces, all of it in EFI/BOOT:
+#
+#   BOOTX64.EFI   shimx64.efi.signed          Microsoft-signed; what firmware runs
+#   grubx64.efi   systemd-bootx64.efi.signed  Debian-signed; what shim runs
+#   mmx64.efi     mmx64.efi.signed            MokManager, for enrolling your own key
+#
+# grubx64.efi is not a typo and there is no GRUB here. Debian's shim has its
+# second stage fixed at build time to the string `\\grubx64.efi`, resolved
+# relative to shim's own directory (`strings -el /usr/lib/shim/shimx64.efi.signed`
+# shows it). Renaming the file is how you point shim at a different loader
+# without rebuilding it.
+#
+# EFI/BOOT rather than EFI/systemd, and only EFI/BOOT: it is the UEFI
+# removable-media path, so it is what fires when there is no NVRAM entry at all
+# -- the bootc-image-builder case, where `--generic-image` implies
+# `--no-variables`. EFI/systemd is left exactly as bootctl wrote it. That copy
+# is a perfectly good unsigned-chain bootloader for a machine with Secure Boot
+# off, and leaving it alone keeps `bootctl` able to recognise its own install.
+#
+# fbx64.efi is deliberately not copied. It is shim's fallback loader, whose job
+# is to build NVRAM entries from a BOOT<arch>.CSV, and shim only invokes it
+# when it finds it next to itself. With no CSV shipped here it has nothing to
+# do, so its absence is what keeps shim going straight to its second stage.
+#
+# Takes an optional ESP block device as $1, for the case where the search below
+# cannot pick one on its own.
+set -euo pipefail
+
+readonly ESP_GUID=c12a7328-f81f-11d2-ba4b-00a0c93ec93b
+
+readonly SHIM=/usr/lib/shim/shimx64.efi.signed
+readonly SDBOOT=/usr/lib/systemd/boot/efi/systemd-bootx64.efi.signed
+readonly MOKMANAGER=/usr/lib/shim/mmx64.efi.signed
+
+log() { printf '%s\n' "$*"; }
+die() { printf 'os4-secureboot-esp: %s\n' "$*" >&2; exit 1; }
+
+# Mounting and writing to the ESP both need it, and failing here says so once
+# rather than as a confusing mount error further down.
+[ "$(id -u)" -eq 0 ] || die "must run as root"
+
+# --------------------------------------------------------------------------
+# The inputs
+# --------------------------------------------------------------------------
+# All three come from packages the Containerfile installs by name. A missing
+# one means that line changed, not that this machine is unusual, so say which.
+for f in "${SHIM}" "${SDBOOT}" "${MOKMANAGER}"; do
+  [ -f "${f}" ] || die "${f} is missing -- is shim-signed / systemd-boot-efi-amd64-signed still installed?"
+done
+
+# --------------------------------------------------------------------------
+# Find the ESP
+# --------------------------------------------------------------------------
+# By partition type rather than by mount point. bootc's composefs install path
+# mounts the ESP at /boot (crates/lib/src/bootc_composefs/boot.rs: "unconditionally
+# mount the ESP at /boot for now"), but a tpm2-luks install also gains a separate
+# XBOOTLDR partition, and which of the two lands on /boot is exactly the sort of
+# thing that should not be guessed. The GUID is unambiguous.
+is_esp() {
+  [ -b "$1" ] && [ "$(blkid -o value -s PART_ENTRY_TYPE "$1" 2>/dev/null)" = "${ESP_GUID}" ]
+}
+
+find_esp() {
+  local p dev
+
+  # Already mounted, which is the normal case.
+  for p in /efi /boot/efi /boot; do
+    dev="$(findmnt -n -o SOURCE --target "${p}" 2>/dev/null || true)"
+    # --target reports whatever mount the path falls under, so this happily
+    # returns the root filesystem for a /boot that is only a directory. The
+    # partition-type check is what rejects that.
+    if is_esp "${dev}"; then
+      printf '%s\n' "${dev}"
+      return 0
+    fi
+  done
+
+  # Not mounted. Accept a scan only if it is unambiguous -- picking one of
+  # several ESPs on a multi-disk machine is a decision for a person.
+  local -a found=()
+  while read -r dev; do
+    if is_esp "${dev}"; then
+      found+=("${dev}")
+    fi
+  done < <(lsblk -n -p -l -o PATH 2>/dev/null)
+
+  case "${#found[@]}" in
+    1) printf '%s\n' "${found[0]}"; return 0 ;;
+    0) die "no EFI system partition found" ;;
+    *) die "found ${#found[@]} EFI system partitions (${found[*]}) -- pass the right one as an argument" ;;
+  esac
+}
+
+if [ "$#" -gt 0 ]; then
+  esp_dev="$1"
+  is_esp "${esp_dev}" || die "$1 is not an EFI system partition"
+else
+  esp_dev="$(find_esp)"
+fi
+
+# --------------------------------------------------------------------------
+# Get at it writably
+# --------------------------------------------------------------------------
+# bootc boots with the ESP read-only -- it writes a
+# `systemd.mount-extra=UUID=...:/boot:auto:ro` karg -- so the mounted case has
+# to be remounted and then put back the way it was found. The unmounted case
+# gets a private mount instead. Both cannot be one code path: a second mount of
+# the same block device shares the superblock, so it cannot be rw while the
+# first is ro.
+esp_mnt="$(findmnt -n -o TARGET --source "${esp_dev}" 2>/dev/null | head -n1 || true)"
+
+# Always at least sync: place() below fsyncs each file it writes but not the
+# renames, and this is a FAT partition that firmware reads without the kernel's
+# help. The mount handling appends to it.
+cleanup="sync"
+
+if [ -n "${esp_mnt}" ]; then
+  # Matched with `case` rather than piped through grep: with `pipefail` set, a
+  # `findmnt | head | grep -q` pipeline reports failure when grep's early exit
+  # SIGPIPEs findmnt, which would read here as "already writable" and leave the
+  # writes below to fail against a read-only mount.
+  esp_opts="$(findmnt -n -o VFS-OPTIONS --source "${esp_dev}" 2>/dev/null | head -n1 || true)"
+  case ",${esp_opts}," in
+    *,ro,*)
+      mount -o remount,rw "${esp_mnt}"
+      cleanup="${cleanup}; mount -o remount,ro ${esp_mnt}"
+      ;;
+  esac
+else
+  esp_mnt="$(mktemp -d)"
+  mount -t vfat -o rw "${esp_dev}" "${esp_mnt}"
+  cleanup="${cleanup}; umount ${esp_mnt} && rmdir ${esp_mnt}"
+fi
+
+# shellcheck disable=SC2064 # Expand now: the paths must survive into the trap.
+trap "${cleanup}" EXIT
+
+boot_dir="${esp_mnt}/EFI/BOOT"
+[ -d "${boot_dir}" ] || die "${boot_dir} does not exist -- has a bootloader been installed on ${esp_dev}?"
+
+# --------------------------------------------------------------------------
+# Install the chain
+# --------------------------------------------------------------------------
+# Second stage first, shim last. A run interrupted between the two then leaves
+# a machine that still boots the old way, rather than a shim with nothing to
+# hand off to.
+changed=0
+place() {
+  local src="$1" dest="${boot_dir}/$2"
+  if cmp -s "${src}" "${dest}"; then
+    return 0
+  fi
+  # `cp` and not `install -m`: this is vfat, whose ->setattr rejects a chmod to
+  # anything but the mode the mount derives from its umask, so asking for an
+  # explicit mode is a way to fail on the target filesystem and nowhere else.
+  # Permissions on a FAT partition are a property of the mount regardless.
+  #
+  # Written beside the destination and renamed: same filesystem, so the rename
+  # is atomic and a torn copy is never left under a name firmware might run.
+  cp -f "${src}" "${dest}.new"
+  sync "${dest}.new"
+  mv -f "${dest}.new" "${dest}"
+  log "  installed $(basename "${src}") as EFI/BOOT/$2"
+  changed=1
+}
+
+log "os4-secureboot-esp: ESP ${esp_dev} at ${esp_mnt}"
+place "${SDBOOT}"     grubx64.efi
+place "${MOKMANAGER}" mmx64.efi
+place "${SHIM}"       BOOTX64.EFI
+
+if [ "${changed}" -eq 0 ]; then
+  log "  already in place, nothing to do"
+fi

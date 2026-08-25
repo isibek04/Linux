@@ -18,7 +18,8 @@ systemctl enable \
   cups.service \
   acct.service \
   power-profiles-daemon.service \
-  ssh.service
+  ssh.service \
+  os4-secureboot-esp.service
 
 # Optional units, enabled if present. The libvirt sockets are socket-activated
 # so nothing runs until a VM is asked for; they are guarded because Debian's

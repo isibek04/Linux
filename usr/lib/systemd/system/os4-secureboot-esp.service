@@ -1,0 +1,25 @@
+[Unit]
+Description=Put shim in front of systemd-boot on the ESP
+Documentation=file:///usr/libexec/os4-secureboot-esp
+# A deployed bootc host, not this image running as a container.
+ConditionPathExists=/run/ostree-booted
+# Nothing to do where there is no ESP to fix. The image installs no BIOS
+# bootloader, so a machine without this is not booting from this disk anyway.
+ConditionPathExists=/sys/firmware/efi
+# The script finds the ESP by partition type and mounts it itself, but it still
+# needs the block devices to have been probed.
+After=local-fs.target
+
+[Service]
+Type=oneshot
+# Runs on every boot rather than once. It is a no-op when the ESP is already
+# right, and running it again is what repairs the chain if `bootctl install`
+# ever puts the unshimmed systemd-boot back at EFI/BOOT/BOOTX64.EFI.
+ExecStart=/usr/libexec/os4-secureboot-esp
+# Nothing else is ordered after this, so a failure marks the unit failed and
+# leaves the boot alone -- which is the right outcome: a machine whose ESP
+# could not be fixed is a machine that boots with Secure Boot off, exactly
+# where it started. `systemctl status os4-secureboot-esp` says why.
+
+[Install]
+WantedBy=multi-user.target
