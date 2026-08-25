@@ -170,6 +170,80 @@ jobs:
             .
           echo "built=true" >> "$GITHUB_OUTPUT"
 
+      # skopeo does two jobs here: it pushes (docker push writes Docker schema 2
+      # manifests, and bootc cannot install those -- see the push step), and it
+      # is how the verification below hands the sealed image to bootc. Its own
+      # step, ahead of both, so that one missing tool is reported once.
+      #
+      # The runner snapshot carries skopeo (CI/scripts/provision-runner.sh).
+      # This installs it anyway, for a VM booted from a snapshot predating that
+      # change. Output is not swallowed: a silent apt failure here reads as
+      # "skopeo is required", which says nothing about why.
+      - name: Ensure skopeo is present
+        run: |
+          set -euo pipefail
+          if ! command -v skopeo >/dev/null 2>&1; then
+            echo "skopeo not on the runner -- installing it."
+            sudo=""
+            [ "$(id -u)" -eq 0 ] || sudo=sudo
+            export DEBIAN_FRONTEND=noninteractive
+            if command -v apt-get >/dev/null 2>&1; then
+              $sudo apt-get update -q || true
+              $sudo apt-get install -yq skopeo || true
+            elif command -v dnf >/dev/null 2>&1; then
+              $sudo dnf install -y skopeo || true
+            fi
+          fi
+          if ! command -v skopeo >/dev/null 2>&1; then
+            echo "skopeo is required: docker push cannot write OCI media types," >&2
+            echo "and a schema 2 image in the registry cannot be installed by" >&2
+            echo "bootc -- it dies looking for a config blob that does not" >&2
+            echo "exist. Add skopeo to the runner snapshot." >&2
+            exit 1
+          fi
+
+      # The composefs digest embedded in the UKI is computed inside the build,
+      # over a bind-mounted snapshot of the split stage; the digest a host
+      # computes comes from the layers that were committed. When those two
+      # trees are not identical, the image builds, signs and pushes perfectly
+      # and then no machine will take it:
+      #
+      #   The UKI has the wrong composefs= parameter (is '02e186...', should
+      #   be '936f0e...')
+      #
+      # Which is how the first sealed images shipped. This runs the check a host
+      # runs, against the finished image, and prints the differing dumpfile
+      # entries when it fails, so the next occurrence arrives diagnosed. It
+      # runs on pull requests too, where the sealed image is built and not
+      # pushed: catching it there is the point.
+      #
+      # The result is recorded rather than thrown, and the job is failed at the
+      # very end. A broken sealed variant withholds the `-sealed` tags and
+      # nothing else: the main tags are what deployed machines upgrade from,
+      # and stopping their publish over a variant no machine runs yet would be
+      # the more expensive failure.
+      #
+      # Not free: the image is copied into containers-storage for bootc to
+      # read, and hashing it writes every file object into a throwaway
+      # composefs repo. See build/verify-sealed.sh.
+      - name: Verify the sealed image is installable
+        id: verify
+        if: steps.sealed.outputs.built == 'true'
+        run: |
+          set -euo pipefail
+          cd src
+          set -- ${{ steps.meta.outputs.sealed_tags }}
+          if [ "$#" -eq 0 ]; then
+            echo "No sealed tags resolved for this event -- nothing to verify."
+            exit 0
+          fi
+          # Every sealed tag is the same manifest, so one is the whole check.
+          if ./build/verify-sealed.sh "$1"; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          fi
+
       # PRs build only -- no push, matching the GitHub workflow's behaviour.
       - name: Log in to ${{ env.REGISTRY }}
         if: github.event_name != 'pull_request'
@@ -204,30 +278,6 @@ jobs:
         if: github.event_name != 'pull_request'
         run: |
           set -euo pipefail
-          # The runner snapshot carries skopeo (CI/scripts/provision-runner.sh).
-          # This installs it anyway, for a VM booted from a snapshot predating
-          # that change. Output is not swallowed: a silent apt failure here
-          # reads as "skopeo is required" below, which says nothing about why.
-          if ! command -v skopeo >/dev/null 2>&1; then
-            echo "skopeo not on the runner -- installing it."
-            sudo=""
-            [ "$(id -u)" -eq 0 ] || sudo=sudo
-            export DEBIAN_FRONTEND=noninteractive
-            if command -v apt-get >/dev/null 2>&1; then
-              $sudo apt-get update -q || true
-              $sudo apt-get install -yq skopeo || true
-            elif command -v dnf >/dev/null 2>&1; then
-              $sudo dnf install -y skopeo || true
-            fi
-          fi
-          if ! command -v skopeo >/dev/null 2>&1; then
-            echo "skopeo is required: docker push cannot write OCI media types," >&2
-            echo "and a schema 2 image in the registry cannot be installed by" >&2
-            echo "bootc -- it dies looking for a config blob that does not" >&2
-            echo "exist. Add skopeo to the runner snapshot." >&2
-            exit 1
-          fi
-
           auth="${DOCKER_CONFIG}/config.json"
           digestfile="$(mktemp)"
 
@@ -255,11 +305,10 @@ jobs:
           echo "digest=${digest}" >> "$GITHUB_OUTPUT"
           echo "image=${first%:*}" >> "$GITHUB_OUTPUT"
 
-      # Same push, for the sealed variant. skopeo is guaranteed by the step
-      # above -- it installed the tool or failed the job.
+      # Same push, for the sealed variant.
       - name: Push sealed image
         id: push_sealed
-        if: github.event_name != 'pull_request' && steps.sealed.outputs.built == 'true'
+        if: github.event_name != 'pull_request' && steps.verify.outputs.ok == 'true'
         run: |
           set -euo pipefail
           auth="${DOCKER_CONFIG}/config.json"
@@ -324,6 +373,17 @@ jobs:
       # The ephemeral server lives ~5 more minutes and may take the next job;
       # keep its disk clean but leave tagged layers as cache for a queued
       # follow-up build.
+      # Last, so that everything the sealed variant does not affect has already
+      # happened: the main tags are pushed and signed, and only then does the
+      # job go red over an image it declined to publish.
+      - name: Fail if the sealed image did not verify
+        if: steps.verify.outputs.ok == 'false'
+        run: |
+          echo "The sealed variant was built but not published: its UKI is" >&2
+          echo "sealed against a different tree than the image itself. See the" >&2
+          echo "dumpfile diff in the verification step above." >&2
+          exit 1
+
       - name: Clean up
         if: always()
         run: |

@@ -20,6 +20,20 @@
 # Both certificates are read from the rootfs itself: the repo commits them
 # under usr/share/os4/secureboot, so they are already in /target and CI has
 # nothing to provide beyond the key.
+#
+# Two by-products land in /diag, for build/verify-sealed.sh and for whoever
+# has to debug the next digest mismatch:
+#
+#   <kver>.composefs-dump.gz  the measured tree exactly as it was hashed here
+#   <kver>.cmdline            the cmdline read back out of the signed UKI
+#
+# The dumpfile is what turns "the digests differ" into "these paths differ":
+# `bootc container compute-composefs-digest-from-storage --write-dumpfile-to`
+# produces the same shape from a finished image, so the two diff line for
+# line. Both are copied into the sealed image under /boot, which composefs
+# does not measure -- see the Containerfile. The cmdline is read back with
+# objcopy rather than remembered from the digest computed above, so what is
+# recorded is what the signed artifact actually carries.
 set -euo pipefail
 
 readonly BOOTC=/output/usr/bin/bootc
@@ -45,12 +59,13 @@ kdirs=(/kernel/*)
 kver="$(basename "${kdirs[0]}")"
 echo "Building UKI for ${kver}"
 
-mkdir -p /out
+mkdir -p /out /diag
 unsigned="$(mktemp -d)/unsigned.efi"
 
 "${BOOTC}" container ukify \
   --rootfs /target \
   --kernel-dir "/kernel/${kver}" \
+  --write-dumpfile-to "/diag/${kver}.composefs-dump" \
   -- \
   --output "${unsigned}"
 
@@ -69,3 +84,13 @@ rm -f "${unsigned}"
 # firmware -- that is what the VM test with OVMF is for.
 sbverify --cert "${CERTS}/ca.crt.pem" "/out/${kver}.efi"
 echo "Signed UKI at /out/${kver}.efi"
+
+# The .cmdline section of the signed UKI, which is the number a host will hold
+# the image to. Left as the raw section content, NUL padding and all; the
+# reader strips it.
+objcopy -O binary --only-section=.cmdline "/out/${kver}.efi" "/diag/${kver}.cmdline"
+echo "UKI cmdline: $(tr -d '\0' < "/diag/${kver}.cmdline")"
+
+# A quarter of a million lines of text, and every sealed image would otherwise
+# carry it uncompressed.
+gzip -9 "/diag/${kver}.composefs-dump"

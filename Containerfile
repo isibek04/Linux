@@ -396,7 +396,8 @@ CMD ["/sbin/init"]
 # clear() on both and resets /boot's mtime from /usr's -- so files *and*
 # directories underneath them are outside the measured tree. Both directories
 # do have to exist, or the transform errors; bootc-rootfs.sh creates them. The
-# final stage's COPY creates the EFI/Linux chain under /boot.
+# final stage's COPY creates the EFI/Linux chain under /boot, and /boot/os4
+# alongside it.
 # Verified against bootc v1.16.9 by hashing two images differing only in
 # whether that COPY had to create the directory chain: same digest either way.
 FROM rootfs AS split
@@ -404,8 +405,9 @@ RUN mkdir /kernel && bootc container split-kernel-and-rootfs --rootfs / --output
 
 # The tools stage. FROM builder rather than a fresh Debian: the bootc binary
 # it built is at /output/usr/bin/bootc and the libostree it links against is
-# already installed there. Nothing in this stage ships -- only /out, the one
-# signed UKI, is copied into the final stage.
+# already installed there. Nothing in this stage ships but its two output
+# directories: /out, the one signed UKI, and /diag, the build's record of what
+# it hashed and signed.
 #
 # The leaf private key arrives as a BuildKit secret, mounted for the one RUN
 # and never written to a layer; both certificates are read from the split
@@ -413,9 +415,13 @@ RUN mkdir /kernel && bootc container split-kernel-and-rootfs --rootfs / --output
 # rather than ukify's --secureboot-* options because shim verifies the leaf
 # by walking the chain up to the MOK-enrolled CA, and embedding that chain
 # (sbsign --addcert) is the part ukify cannot express. Details in the script.
+#
+# binutils is here for one objcopy call: reading the .cmdline section back out
+# of the signed UKI, so that what the verification step compares against is
+# the artifact rather than a number the build wrote down.
 FROM builder AS uki
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      sbsigntool systemd-boot-efi systemd-ukify \
+      binutils sbsigntool systemd-boot-efi systemd-ukify \
  && rm -rf /var/lib/apt/lists/*
 COPY build/uki-build.sh /tmp/build/
 RUN --mount=type=bind,from=split,target=/target \
@@ -426,8 +432,16 @@ RUN --mount=type=bind,from=split,target=/target \
 # The sealed image: the split rootfs plus its signed UKI, at the path bootc's
 # composefs install reads UKIs from. Labels, STOPSIGNAL and CMD are inherited
 # from the rootfs stage through FROM, so nothing repeats here.
+#
+# /boot/os4 carries the build's own record of what it hashed and what it
+# signed -- the composefs dumpfile and the UKI's cmdline, see
+# build/uki-build.sh. It rides along for free: /boot is not measured, so the
+# files cannot shift the digest they describe, and bootc looks for boot
+# entries only under /boot/EFI/Linux and /usr/lib/modules, so a directory
+# beside them is inert. build/verify-sealed.sh reads both back out.
 FROM split AS sealed
 COPY --from=uki /out/ /boot/EFI/Linux/
+COPY --from=uki /diag/ /boot/os4/
 
 # Default target: the classic image. Stages build in dependency order but a
 # bare `docker build` produces the *last* stage, which the sealed chain above
