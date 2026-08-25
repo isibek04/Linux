@@ -26,6 +26,13 @@ env:
   # `${HOME}/.docker/config.json` under `set -u` aborts the step with
   # "HOME: unbound variable". An explicit path removes the question.
   DOCKER_CONFIG: /tmp/os4-docker-${{ github.run_id }}
+  # forgejo-runner gives the job a pseudo-terminal, so BuildKit picks its TTY
+  # progress mode and redraws the step table in place several times a second.
+  # A terminal collapses those frames into one block; a captured log keeps
+  # every one of them, wrapped in cursor-up escapes -- tens of thousands of
+  # lines for a build whose real output is a few hundred. `plain` is the
+  # append-only mode, which is what a log wants.
+  BUILDKIT_PROGRESS: plain
 
 jobs:
   build:
