@@ -345,6 +345,15 @@ RUN /tmp/build/enable-units.sh
 # See build/apparmor-home.sh.
 RUN /tmp/build/apparmor-home.sh
 
+# The postinst scripts above generated this machine's identity on the way past
+# -- SSH host keys, a snakeoil certificate, an iSCSI initiator name -- and in
+# image mode "this machine" is the build container, so all of it would be
+# copied onto every host installed from the image. build/strip-identity.sh
+# removes it, arranges for the parts that are needed to be regenerated on first
+# boot, and fails the build if anything key-shaped is still under /etc. It has
+# to run after the last package step, for the obvious reason.
+RUN /tmp/build/strip-identity.sh
+
 # Everything above this line is an ordinary Debian root. This is the step that
 # makes it bootable -- and it empties /var, so nothing may install a package
 # after it.

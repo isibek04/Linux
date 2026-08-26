@@ -198,6 +198,5 @@ enabled = yes
 readonly = true
 EOF
 
-# An image-wide machine-id would give every machine installed from this image
-# the same identity. Leave it empty so systemd provisions one on first boot.
-: > /etc/machine-id
+# machine-id used to be truncated here. It is in build/strip-identity.sh now,
+# with the rest of the per-machine identity the package steps generated.

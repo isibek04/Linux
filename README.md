@@ -607,6 +607,67 @@ the binaries whose loss broke rootless podman on os3 — `newuidmap`,
 `newgidmap` — are setuid rather than capability-based on Debian, and setuid
 bits survive.
 
+## The image ships no host identity
+
+A `postinst` that generates a key generates it once, on the machine the package
+is being installed on. In image mode that machine is the build container, and
+what it wrote is copied onto every host installed from the image — so
+`openssh-server`'s `ssh-keygen` did not give each machine a host key, it gave
+every machine the *same* host key, private half included, in a published image.
+The comment field the key carried said so plainly:
+
+```
+ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAII6ODJSwEvelfusDZHVgtkAaAztBrO/AtbWlapaFXaFw root@buildkitsandbox
+```
+
+Anyone who could pull the image could impersonate any host that booted from it,
+and decrypt any session they could capture. `build/strip-identity.sh` runs after
+the last package step and removes what the package steps generated:
+
+| What | Why it cannot ship | What puts a real one back |
+| --- | --- | --- |
+| `/etc/ssh/ssh_host_*_key` | Every host answers with one identity, and the private half is public | `sshd-keygen.service`, with the drop-in below |
+| `/etc/ssl/private/ssl-cert-snakeoil.key` and its `.pem` | A shared private key, from `ssl-cert`, which `cups` depends on | Nothing — no file in `/etc` and no unit in this image references it. `make-ssl-cert generate-default-snakeoil` is what makes one if something ever needs it |
+| `/etc/iscsi/initiatorname.iscsi` | Not a secret, but the file itself says the IQN must be unique per initiator | `iscsid.service`'s `ExecStartPre` runs `startup-checks.sh`, which calls `iscsi-iname` when the file is absent |
+| `/etc/machine-id` | One systemd identity for every machine | systemd, on first boot, from the empty file left behind |
+
+Debian already ships the unit that regenerates SSH host keys, and
+`openssh-server`'s `postinst` already enables it into `ssh.service.wants` — but
+it is gated on `ConditionFirstBoot=yes`, and a host reaching this image through
+`bootc upgrade` is not on its first boot. Its `/etc` is a three-way merge
+against the image's, so dropping the keys here drops them from that host too,
+and with the gate in place nothing would put new ones back: `sshd` would fail to
+start. A drop-in resets the condition — an empty assignment clears the list —
+and `ssh-keygen -A` creates only what is missing, so every later boot costs
+three `stat` calls.
+
+`/etc/hostname` is the one thing left alone, and it cannot be otherwise: it
+comes from the Debian base image, containing `debuerreotype` — the name of the
+tool that built that image — and the builder bind-mounts its own over the top
+for the duration of every `RUN`, so a `rm` gets `EBUSY` and a write lands in the
+mount rather than in the layer. Not a secret; a host that has never had a
+hostname set is called that until something sets one.
+
+The script ends by checking its own work, and that half is for the next package
+rather than this one. Every file under `/etc` is searched for a PEM private-key
+header — content rather than a list of names, so it needs no maintenance — and
+the identities that are not PEM are checked by name. A package added to the
+Containerfile later that quietly writes a key in its `postinst` fails the build
+there, rather than being noticed in a published image.
+
+Hosts installed before this was fixed still have the shared keys in their
+writable `/etc`, where the merge leaves them if they were ever modified. After
+upgrading:
+
+```
+sudo rm -f /etc/ssh/ssh_host_*_key /etc/ssh/ssh_host_*_key.pub
+sudo ssh-keygen -A
+sudo systemctl restart ssh
+```
+
+Clients will report a changed host key on the next connection, which is the
+correct outcome and the point of the exercise.
+
 ## Workflows
 
 | Workflow | Trigger | Notes |
