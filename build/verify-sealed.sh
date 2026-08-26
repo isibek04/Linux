@@ -63,8 +63,19 @@ trap cleanup EXIT
 # podman already keeps its images in containers-storage; docker does not.
 case "${engine}" in
   docker)
+    # --format oci for the same reason the push step uses it: what comes out of
+    # the daemon is a Docker schema 2 manifest with a Docker-shaped config, and
+    # bootc reads images back through skopeo's proxy, which presents whatever is
+    # stored as OCI. Converting the config on read derives a digest the store
+    # has no blob for, and the pull dies on it:
+    #
+    #   Failed to pull config Descriptor { ... }: failed to invoke method
+    #   GetBlob: locating item named "sha256:615974c5..." for image with ID
+    #   "sha256:2b232897..." ...: file does not exist
+    #
+    # Converting at copy time instead stores the OCI config as a real blob.
     echo "Copying ${image} into containers-storage, where bootc can read it"
-    ${SUDO} skopeo copy --quiet "docker-daemon:${image}" "containers-storage:${image}"
+    ${SUDO} skopeo copy --quiet --format oci "docker-daemon:${image}" "containers-storage:${image}"
     copied=1
     store=/var/lib/containers
     ;;
@@ -107,11 +118,16 @@ expected="$("${engine}" run --rm --privileged \
 # the signed UKI carries, extracted from its .cmdline section by
 # build/uki-build.sh. The section is NUL-padded, and the karg is `composefs=`
 # with an optional leading `?` meaning fsverity may be missing.
-cmdline="$("${engine}" run --rm "${image}" sh -c 'cat /boot/os4/*.cmdline' | tr -d '\0')"
+# `|| true` because pipefail would otherwise abort here with nothing said but
+# the shell's own error, and an image built before /boot/os4 existed is a case
+# worth naming rather than dying on.
+cmdline="$("${engine}" run --rm "${image}" sh -c 'cat /boot/os4/*.cmdline' | tr -d '\0')" || true
 actual="$(printf '%s' "${cmdline}" | tr ' ' '\n' | sed -n 's/^composefs=?\{0,1\}//p')"
 
 [ -n "${actual}" ] || {
-  echo "verify-sealed: no composefs= karg in the UKI cmdline: '${cmdline}'" >&2
+  echo "verify-sealed: no composefs= karg found in ${image}." >&2
+  echo "The build records it at /boot/os4/<kver>.cmdline; an image built before" >&2
+  echo "that existed cannot be verified, only rebuilt. Read: '${cmdline}'" >&2
   exit 1
 }
 
