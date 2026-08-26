@@ -19,14 +19,16 @@
 #                            the space nor O_TMPFILE
 #   /run/secrets/sb_leaf_key the leaf private key
 #
-# `bootc container ukify` computes the composefs digest of /target, collects
-# kargs from /target/usr/lib/bootc/kargs.d, and hands both to the real ukify
-# as the embedded cmdline. Signing is NOT left to ukify, deliberately:
-# ukify's --secureboot-* options sign with the one certificate they are
-# given, and shim can only verify our leaf-signed UKI by walking the chain
-# up to the MOK-enrolled CA -- which requires the chain to be embedded in
-# the Authenticode signature. sbsign's --addcert is what does that, so the
-# UKI is built unsigned and signed in a second step.
+# `bootc container ukify` computes the composefs digest of /target and
+# collects kargs from /target/usr/lib/bootc/kargs.d; those, the digest and the
+# `--karg` below become the cmdline it embeds through the real ukify.
+#
+# Signing is NOT left to ukify, deliberately: ukify's --secureboot-* options
+# sign with the one certificate they are given, and shim can only verify our
+# leaf-signed UKI by walking the chain up to the MOK-enrolled CA -- which
+# requires the chain to be embedded in the Authenticode signature. sbsign's
+# --addcert is what does that, so the UKI is built unsigned and signed in a
+# second step.
 #
 # Both certificates are read from the image itself: the repo commits them
 # under usr/share/os4/secureboot, so they are already in /target and CI has
@@ -77,9 +79,29 @@ echo "Building UKI for ${kver}"
 mkdir -p /out/EFI/Linux /out/os4
 unsigned="$(mktemp -d)/unsigned.efi"
 
+# The one karg, and why there has to be one. The cmdline built here is the
+# whole of /proc/cmdline on a UKI host: write_systemd_uki_config gives the
+# boot entry no `options` line, so the kargs `bootc install` computes --
+# root=, rw, boot= -- never reach a UKI deployment. root= is not missed,
+# because os4's partitions carry Discoverable Partitions Spec type GUIDs and
+# systemd-gpt-auto-generator finds the LUKS root without it. `rw` is missed:
+# without it gpt-auto mounts that root read-only, and /var and /etc, which
+# bootc-initramfs-setup binds out of the same filesystem, come up read-only
+# with it. Found by booting a sealed deployment on 2026-08-26.
+#
+# It seals nothing less. The composefs root is still mounted ro with
+# verity=require, and bootc-initramfs-setup still marks /sysroot read-only on
+# its own (crates/initramfs/src/lib.rs, set_mount_readonly). `rw` reaches only
+# the ext4 underneath, which holds /var and /etc and has to be writable.
+#
+# Here rather than in a usr/lib/bootc/kargs.d entry deliberately: that
+# directory is inside the measured tree, so a karg there moves the composefs
+# digest of every image built. A karg passed to ukify is a property of the
+# UKI alone.
 "${BOOTC}" container ukify \
   --rootfs /target \
   --kernel-dir "/target/kernel/${kver}" \
+  --karg rw \
   --write-dumpfile-to "/out/os4/${kver}.composefs-dump" \
   -- \
   --output "${unsigned}"
