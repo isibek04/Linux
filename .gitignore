@@ -7,3 +7,6 @@ output/
 *.qcow2
 *.raw
 __pycache__/
+
+# Written by build/sign-uki.sh, consumed by the Containerfile's sealed stage
+uki-out/

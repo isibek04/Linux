@@ -22,28 +22,33 @@ env:
   REGISTRY: git.sebz.me
   IMAGE_NAME: ${{ github.repository }}
   # Every registry client in this workflow reads its credentials from here.
-  # Not $HOME/.docker: the runner executes in host mode with HOME unset, so
-  # `${HOME}/.docker/config.json` under `set -u` aborts the step with
-  # "HOME: unbound variable". An explicit path removes the question.
-  DOCKER_CONFIG: /tmp/os4-docker-${{ github.run_id }}
-  # forgejo-runner gives the job a pseudo-terminal, so BuildKit picks its TTY
-  # progress mode and redraws the step table in place several times a second.
-  # A terminal collapses those frames into one block; a captured log keeps
-  # every one of them, wrapped in cursor-up escapes -- tens of thousands of
-  # lines for a build whose real output is a few hundred. `plain` is the
-  # append-only mode, which is what a log wants.
-  BUILDKIT_PROGRESS: plain
+  # Not the default under $HOME: the runner executes in host mode with HOME
+  # unset, so anything resolving `${HOME}/...` under `set -u` aborts the step
+  # with "HOME: unbound variable". An explicit path removes the question.
+  # podman and skopeo both honour this variable.
+  REGISTRY_AUTH_FILE: /tmp/os4-auth-${{ github.run_id }}/auth.json
 
 jobs:
   build:
     # Runs directly on the ephemeral Hetzner runner host (`hetzner-host`
-    # label) and builds with the host's docker. The earlier nested-podman
-    # approach only worked under the retired on-host rootless-podman runner;
-    # forge-autoscale's job containers are docker/runc with the default
-    # seccomp profile, which blocks the user-namespace clone nested podman
-    # needs ("cannot clone: Operation not permitted / cannot re-exec
-    # process"). Host mode has no node, so no JS actions here — the repo is
-    # cloned by hand.
+    # label) and builds with the host's podman. Not nested podman, which is
+    # what failed before: forge-autoscale's job containers are docker/runc
+    # with the default seccomp profile, blocking the user-namespace clone
+    # nested podman needs ("cannot clone: Operation not permitted / cannot
+    # re-exec process"). In host mode there is no container to nest inside.
+    #
+    # podman rather than docker because every image here has to reach
+    # containers-storage in the end -- it is the only store bootc reads, both
+    # for the verification below and for the digest the sealed variant is
+    # built around. Going through the docker daemon means a conversion on the
+    # way out (Docker schema 2 into an OCI reader, which bootc fails on) and
+    # an image-sized copy to get it there. podman builds into that store
+    # directly, and it is what this repo is developed against locally, which
+    # is worth more than it sounds: the mtime bug the sealed variant is built
+    # around hid for three runs behind exactly that difference.
+    #
+    # Host mode has no node, so no JS actions here — the repo is cloned by
+    # hand.
     runs-on: hetzner-host
 
     steps:
@@ -115,6 +120,46 @@ jobs:
           echo "sealed_tags=${sealed}" >> "$GITHUB_OUTPUT"
           echo "Resolved sealed tags: ${sealed}"
 
+      # skopeo is what pushes; podman is what builds, signs and verifies. The
+      # runner snapshot should carry both (CI/scripts/provision-runner.sh);
+      # this installs them anyway, for a VM booted from a snapshot predating
+      # that change. Output is not swallowed: a silent apt failure here would
+      # otherwise read as a bare "required", which says nothing about why.
+      #
+      # First step of the job that needs either, so one missing tool is
+      # reported once, and before an 11 GB build rather than after.
+      - name: Ensure podman and skopeo are present
+        run: |
+          set -euo pipefail
+          missing=""
+          for t in podman skopeo; do
+            command -v "$t" >/dev/null 2>&1 || missing="${missing} $t"
+          done
+          if [ -n "${missing}" ]; then
+            echo "Not on the runner --${missing}. Installing."
+            sudo=""
+            [ "$(id -u)" -eq 0 ] || sudo=sudo
+            export DEBIAN_FRONTEND=noninteractive
+            if command -v apt-get >/dev/null 2>&1; then
+              $sudo apt-get update -q || true
+              # shellcheck disable=SC2086
+              $sudo apt-get install -yq ${missing} || true
+            elif command -v dnf >/dev/null 2>&1; then
+              # shellcheck disable=SC2086
+              $sudo dnf install -y ${missing} || true
+            fi
+          fi
+          for t in podman skopeo; do
+            command -v "$t" >/dev/null 2>&1 || {
+              echo "${t} is required and could not be installed." >&2
+              echo "podman builds every image here and is what bootc reads its" >&2
+              echo "store through; skopeo pushes, because podman push cannot be" >&2
+              echo "held to OCI media types and bootc cannot install anything" >&2
+              echo "else. Add both to the runner snapshot." >&2
+              exit 1
+            }
+          done
+
       - name: Build image
         run: |
           set -euo pipefail
@@ -123,8 +168,9 @@ jobs:
           for t in ${{ steps.meta.outputs.tags }}; do
             args="${args} --tag ${t}"
           done
-          docker build \
+          podman build \
             --pull \
+            --format oci \
             --target rootfs \
             --label "org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}" \
             --label "org.opencontainers.image.revision=${{ github.sha }}" \
@@ -132,22 +178,27 @@ jobs:
             --file Containerfile \
             .
 
-      # The sealed variant: same rootfs, with kernel, initramfs and kargs
+      # The sealed variant: the same rootfs with kernel, initramfs and kargs
       # fused into a UKI signed by the Secure Boot leaf key
-      # (usr/share/os4/secureboot -- the certificates are in the repo, only
-      # the key is a secret). It reuses every layer the build above just
-      # made, so this is the split + ukify + sbsign stages on top.
+      # (usr/share/os4/secureboot -- the certificates are in the repo, only the
+      # key is a secret). It reuses every layer the build above just made.
       #
-      # The key crosses into the build as a BuildKit secret, mounted for one
-      # RUN and absent from every layer. Skipped when SB_LEAF_KEY is unset,
-      # the same arrangement signing has with COSIGN_PRIVATE_KEY --
-      # secrets-in-if is not expression-safe, so the emptiness check lives in
-      # the script and later steps key off the `built` output.
+      # Three steps rather than one `--target sealed`, because the UKI cannot
+      # be built inside the image build at all: the composefs digest it embeds
+      # has to be computed over the split image as committed, and a builder
+      # hands out a live filesystem whose mtimes carry nanoseconds that no tar
+      # can preserve. The Containerfile explains it above its uki-tools stage;
+      # build/sign-uki.sh is what runs the tools against a mounted copy of the
+      # committed image.
+      #
+      # Skipped when SB_LEAF_KEY is unset, the same arrangement signing has
+      # with COSIGN_PRIVATE_KEY -- secrets-in-if is not expression-safe, so
+      # the emptiness check lives in the step and later steps key off the
+      # `built` output.
       - name: Build sealed image
         id: sealed
         env:
           SB_LEAF_KEY: ${{ secrets.SB_LEAF_KEY }}
-          DOCKER_BUILDKIT: '1'
         run: |
           set -euo pipefail
           if [ -z "${SB_LEAF_KEY}" ]; then
@@ -156,13 +207,24 @@ jobs:
             exit 0
           fi
           cd src
+          split="os4-split:${{ github.run_id }}"
+          tools="os4-uki-tools:${{ github.run_id }}"
+
+          # The two inputs sign-uki.sh needs: the tree to seal, and the tools
+          # to seal it with. Neither is published.
+          podman build --format oci --target split --tag "${split}" --file Containerfile .
+          podman build --format oci --target uki-tools --tag "${tools}" --file Containerfile .
+
+          # Produces uki-out/, a /boot overlay, which the sealed stage copies.
+          ./build/sign-uki.sh "${split}" "${tools}"
+
           args=""
           for t in ${{ steps.meta.outputs.sealed_tags }}; do
             args="${args} --tag ${t}"
           done
-          docker build \
+          podman build \
+            --format oci \
             --target sealed \
-            --secret id=sb_leaf_key,env=SB_LEAF_KEY \
             --label "org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}" \
             --label "org.opencontainers.image.revision=${{ github.sha }}" \
             ${args} \
@@ -170,52 +232,18 @@ jobs:
             .
           echo "built=true" >> "$GITHUB_OUTPUT"
 
-      # skopeo does two jobs here: it pushes (docker push writes Docker schema 2
-      # manifests, and bootc cannot install those -- see the push step), and it
-      # is how the verification below hands the sealed image to bootc. Its own
-      # step, ahead of both, so that one missing tool is reported once.
-      #
-      # The runner snapshot carries skopeo (CI/scripts/provision-runner.sh).
-      # This installs it anyway, for a VM booted from a snapshot predating that
-      # change. Output is not swallowed: a silent apt failure here reads as
-      # "skopeo is required", which says nothing about why.
-      - name: Ensure skopeo is present
-        run: |
-          set -euo pipefail
-          if ! command -v skopeo >/dev/null 2>&1; then
-            echo "skopeo not on the runner -- installing it."
-            sudo=""
-            [ "$(id -u)" -eq 0 ] || sudo=sudo
-            export DEBIAN_FRONTEND=noninteractive
-            if command -v apt-get >/dev/null 2>&1; then
-              $sudo apt-get update -q || true
-              $sudo apt-get install -yq skopeo || true
-            elif command -v dnf >/dev/null 2>&1; then
-              $sudo dnf install -y skopeo || true
-            fi
-          fi
-          if ! command -v skopeo >/dev/null 2>&1; then
-            echo "skopeo is required: docker push cannot write OCI media types," >&2
-            echo "and a schema 2 image in the registry cannot be installed by" >&2
-            echo "bootc -- it dies looking for a config blob that does not" >&2
-            echo "exist. Add skopeo to the runner snapshot." >&2
-            exit 1
-          fi
-
-      # The composefs digest embedded in the UKI is computed inside the build,
-      # over a bind-mounted snapshot of the split stage; the digest a host
-      # computes comes from the layers that were committed. When those two
-      # trees are not identical, the image builds, signs and pushes perfectly
-      # and then no machine will take it:
+      # A sealed image whose UKI does not match the tree it ships builds, signs
+      # and pushes perfectly, and then no machine will take it:
       #
       #   The UKI has the wrong composefs= parameter (is '02e186...', should
       #   be '936f0e...')
       #
-      # Which is how the first sealed images shipped. This runs the check a host
-      # runs, against the finished image, and prints the differing dumpfile
-      # entries when it fails, so the next occurrence arrives diagnosed. It
-      # runs on pull requests too, where the sealed image is built and not
-      # pushed: catching it there is the point.
+      # Which is how the first sealed images shipped, three runs of it. The
+      # step above is built so that cannot happen again; this is what proves
+      # it, by running the check a host runs against the finished image, and
+      # printing the differing dumpfile entries when it fails so the next
+      # occurrence arrives diagnosed. It runs on pull requests too, where the
+      # sealed image is built and not pushed: catching it there is the point.
       #
       # The result is recorded rather than thrown, and the job is failed at the
       # very end. A broken sealed variant withholds the `-sealed` tags and
@@ -223,9 +251,9 @@ jobs:
       # and stopping their publish over a variant no machine runs yet would be
       # the more expensive failure.
       #
-      # Not free: the image is copied into containers-storage for bootc to
-      # read, and hashing it writes every file object into a throwaway
-      # composefs repo. See build/verify-sealed.sh.
+      # Not free: hashing writes every file object into a throwaway composefs
+      # repo, so it wants image-sized scratch space. See
+      # build/verify-sealed.sh.
       - name: Verify the sealed image is installable
         id: verify
         if: steps.sealed.outputs.built == 'true'
@@ -248,15 +276,15 @@ jobs:
       - name: Log in to ${{ env.REGISTRY }}
         if: github.event_name != 'pull_request'
         run: |
-          mkdir -p "${DOCKER_CONFIG}"
+          mkdir -p "$(dirname "${REGISTRY_AUTH_FILE}")"
           echo "${{ secrets.REGISTRY_TOKEN }}" \
-            | docker login "${REGISTRY}" \
+            | podman login "${REGISTRY}" \
                 --username "${{ secrets.REGISTRY_USER }}" \
                 --password-stdin
 
-      # Pushed with skopeo, not `docker push`, because the media types matter.
-      # docker push always writes a Docker schema 2 manifest and has no flag to
-      # do otherwise. bootc reads an image back out of containers-storage
+      # Pushed with skopeo, not `podman push`, because the media types matter.
+      # podman push follows the stored manifest and has no flag to force OCI on
+      # the wire. bootc reads an image back out of containers-storage
       # through skopeo's image proxy, which presents whatever is stored as OCI --
       # and an OCI manifest needs an OCI config, re-encoded to a digest that
       # storage never held a blob for. `bootc install` then dies before writing
@@ -267,18 +295,18 @@ jobs:
       #   issue): file does not exist
       #
       # Removing and re-pulling the image does not help: the digest is derived,
-      # so it comes back identical every time. `--format oci` is the fix, and it
-      # is why a locally built image (podman build defaults to OCI) installed
-      # fine while the published one never could.
+      # so it comes back identical every time. `--format oci` is the fix, on
+      # both ends -- the builds above ask for it too, so what is stored and
+      # what is pushed agree.
       #
-      # The first tag is streamed out of the docker daemon; the rest are copied
+      # The first tag is streamed out of the local store; the rest are copied
       # registry-side off that one, so the layers upload once.
       - name: Push image
         id: push
         if: github.event_name != 'pull_request'
         run: |
           set -euo pipefail
-          auth="${DOCKER_CONFIG}/config.json"
+          auth="${REGISTRY_AUTH_FILE}"
           digestfile="$(mktemp)"
 
           set -- ${{ steps.meta.outputs.tags }}
@@ -292,7 +320,7 @@ jobs:
           skopeo copy --format oci \
             --dest-authfile "${auth}" \
             --digestfile "${digestfile}" \
-            "docker-daemon:${first}" "docker://${first}"
+            "containers-storage:${first}" "docker://${first}"
 
           for t in "$@"; do
             skopeo copy --format oci \
@@ -311,7 +339,7 @@ jobs:
         if: github.event_name != 'pull_request' && steps.verify.outputs.ok == 'true'
         run: |
           set -euo pipefail
-          auth="${DOCKER_CONFIG}/config.json"
+          auth="${REGISTRY_AUTH_FILE}"
           digestfile="$(mktemp)"
 
           set -- ${{ steps.meta.outputs.sealed_tags }}
@@ -325,7 +353,7 @@ jobs:
           skopeo copy --format oci \
             --dest-authfile "${auth}" \
             --digestfile "${digestfile}" \
-            "docker-daemon:${first}" "docker://${first}"
+            "containers-storage:${first}" "docker://${first}"
 
           for t in "$@"; do
             skopeo copy --format oci \
@@ -343,8 +371,8 @@ jobs:
       #
       # Signed once, by digest, rather than once per tag: every tag resolves to
       # the same manifest, so the old per-tag loop re-signed one digest N times.
-      # The digest now comes from the push step -- `docker inspect` reports what
-      # the local daemon holds, and the daemon is no longer what pushes.
+      # The digest now comes from the push step -- `podman inspect` reports what
+      # the local store holds, and the store is not what the registry sees.
       - name: Sign the published image
         if: github.event_name != 'pull_request'
         env:
@@ -388,5 +416,5 @@ jobs:
         if: always()
         run: |
           rm -rf src || true
-          docker image prune -f || true
+          podman image prune -f || true
           df -h / | tail -1

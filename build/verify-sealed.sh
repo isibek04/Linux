@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Prove a sealed image can be installed, before it is published.
 #
+# Usage: build/verify-sealed.sh <image-ref>
+#
 # `bootc install` and `bootc switch` refuse a sealed image whose UKI carries a
 # composefs= digest that does not match the digest they compute from the image
 # itself:
@@ -9,87 +11,39 @@
 #   The UKI has the wrong composefs= parameter (is '02e186...', should be
 #   '936f0e...')
 #
-# Nothing in the build catches that. The digest baked into the UKI is computed
-# inside the builder, over a bind-mounted snapshot of the split stage; the
-# digest a host computes comes from the layers that were committed and pushed.
-# Those are meant to be the same tree, and when they are not, the first thing
-# to notice is a machine that will not take the update.
+# Nothing in the build catches that, and the first thing to notice is a
+# machine that will not take the update. So this runs the host's half of that
+# comparison against the finished image, and when the two disagree it prints
+# which paths differ -- build/uki-build.sh leaves a dumpfile of what it hashed
+# in /boot/os4, the same shape is computed here, and the two diff line for
+# line. That diff is what identified the mtime truncation the sealed variant
+# was built around; see the Containerfile.
 #
-# So this runs the host's half of that comparison against the finished image,
-# and when the two disagree it prints which paths differ -- the build leaves a
-# dumpfile of what it hashed in /boot/os4 (see build/uki-build.sh), and the
-# same shape is computed here, so the two diff line for line.
+# The image supplies its own bootc, so nothing has to be installed to run this
+# beyond podman.
 #
-# Usage: build/verify-sealed.sh <image-ref>
-#        ENGINE=podman build/verify-sealed.sh <image-ref>
-#
-# The image supplies its own bootc and skopeo, so nothing has to be installed
-# to run this beyond the container engine -- and under docker, skopeo, because
-# the image has to be copied into containers-storage first: bootc reads images
-# through skopeo, which cannot see the docker daemon's graph.
-#
-# Not free. Budget image-sized free space twice over: once for that copy, once
-# for the throwaway composefs repo the digest is hashed into. The repo goes
-# under TMPDIR, defaulting to /var/tmp.
+# Not free: hashing writes every file object into a throwaway composefs repo,
+# so budget image-sized free space under TMPDIR, defaulting to /var/tmp.
 set -euo pipefail
 
 image="${1:-}"
 [ -n "${image}" ] || { echo "usage: $0 <image-ref>" >&2; exit 2; }
-engine="${ENGINE:-docker}"
 
-# containers-storage lives under /var/lib, which the runner user may not own.
-# Same idiom the workflow uses for apt.
-SUDO=""
-[ "$(id -u)" -eq 0 ] || SUDO="sudo"
+# podman reads containers.conf out of the home directory, and forgejo-runner
+# starts the job with HOME unset.
+export HOME="${HOME:-$(getent passwd "$(id -u)" | cut -d: -f6)}"
 
-# Not mktemp's default /tmp: this holds a copy of the image, and /tmp is a
-# tmpfs on plenty of machines.
 scratch="$(mktemp -d "${TMPDIR:-/var/tmp}/os4-verify-XXXXXX")"
 mkdir -p "${scratch}/repo" "${scratch}/out"
-
 # shellcheck disable=SC2329 # Invoked by the trap below.
-cleanup() {
-  # The repo is written by root inside the container, so a non-root caller may
-  # need help removing it. Best effort either way.
-  rm -rf "${scratch}" 2>/dev/null || ${SUDO} rm -rf "${scratch}" 2>/dev/null || true
-  [ -n "${copied:-}" ] && ${SUDO} skopeo delete "containers-storage:${image}" >/dev/null 2>&1
-  return 0
-}
+cleanup() { rm -rf "${scratch}" 2>/dev/null || true; }
 trap cleanup EXIT
 
 # --------------------------------------------------------------------------
 # What a host will compute from the image
 # --------------------------------------------------------------------------
-# podman already keeps its images in containers-storage; docker does not.
-case "${engine}" in
-  docker)
-    # --format oci for the same reason the push step uses it: what comes out of
-    # the daemon is a Docker schema 2 manifest with a Docker-shaped config, and
-    # bootc reads images back through skopeo's proxy, which presents whatever is
-    # stored as OCI. Converting the config on read derives a digest the store
-    # has no blob for, and the pull dies on it:
-    #
-    #   Failed to pull config Descriptor { ... }: failed to invoke method
-    #   GetBlob: locating item named "sha256:615974c5..." for image with ID
-    #   "sha256:2b232897..." ...: file does not exist
-    #
-    # Converting at copy time instead stores the OCI config as a real blob.
-    echo "Copying ${image} into containers-storage, where bootc can read it"
-    ${SUDO} skopeo copy --quiet --format oci "docker-daemon:${image}" "containers-storage:${image}"
-    copied=1
-    store=/var/lib/containers
-    ;;
-  podman)
-    store="$(dirname "$(podman info --format '{{.Store.GraphRoot}}')")"
-    ;;
-  *)
-    echo "verify-sealed: unknown ENGINE '${engine}' (expected docker or podman)" >&2
-    exit 2
-    ;;
-esac
-
-# bootc and skopeo both come from the image under test. Two of these mounts are
-# not obvious:
+# bootc comes from the image under test; the store it reads is the one podman
+# already keeps the image in. Two of these are not obvious:
 #
 #   --privileged  c/storage remounts the store's overlay directory when it
 #                 opens it, which an unprivileged container cannot do
@@ -97,13 +51,15 @@ esac
 #                 permitted"). This is the mode bootc documents for reading a
 #                 host store from inside a container.
 #   /var/tmp      bootc hashes into a throwaway composefs repo there, and the
-#                 repo wants O_TMPFILE, which the container's own overlay layer
-#                 does not support ("Operation not supported (os error 95)").
-#                 /var is also empty in a bootc image until systemd-tmpfiles
-#                 fills it at boot, and a container never boots, so the
-#                 directory has to come from outside regardless.
+#                 repo wants O_TMPFILE, which the container's own overlay
+#                 layer does not support ("Operation not supported (os error
+#                 95)"). /var is also empty in a bootc image until
+#                 systemd-tmpfiles fills it at boot, and a container never
+#                 boots, so the directory has to come from outside regardless.
+store="$(dirname "$(podman info --format '{{.Store.GraphRoot}}')")"
+
 echo "Computing the composefs digest of ${image}"
-expected="$("${engine}" run --rm --privileged \
+expected="$(podman run --rm --privileged \
   --volume "${store}:/var/lib/containers" \
   --volume "${scratch}/repo:/var/tmp" \
   --volume "${scratch}/out:/verify" \
@@ -118,10 +74,11 @@ expected="$("${engine}" run --rm --privileged \
 # the signed UKI carries, extracted from its .cmdline section by
 # build/uki-build.sh. The section is NUL-padded, and the karg is `composefs=`
 # with an optional leading `?` meaning fsverity may be missing.
+#
 # `|| true` because pipefail would otherwise abort here with nothing said but
 # the shell's own error, and an image built before /boot/os4 existed is a case
 # worth naming rather than dying on.
-cmdline="$("${engine}" run --rm "${image}" sh -c 'cat /boot/os4/*.cmdline' | tr -d '\0')" || true
+cmdline="$(podman run --rm "${image}" sh -c 'cat /boot/os4/*.cmdline' | tr -d '\0')" || true
 actual="$(printf '%s' "${cmdline}" | tr ' ' '\n' | sed -n 's/^composefs=?\{0,1\}//p')"
 
 [ -n "${actual}" ] || {
@@ -144,7 +101,7 @@ fi
 # --------------------------------------------------------------------------
 echo >&2
 echo "verify-sealed: ${image} would be refused at install time." >&2
-"${engine}" run --rm --volume "${scratch}/out:/verify" "${image}" \
+podman run --rm --volume "${scratch}/out:/verify" "${image}" \
   sh -c 'zcat /boot/os4/*.composefs-dump.gz > /verify/built.dump' || {
     echo "verify-sealed: the image carries no build-side dumpfile to compare" >&2
     exit 1

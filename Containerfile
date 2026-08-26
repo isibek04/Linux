@@ -387,66 +387,74 @@ CMD ["/sbin/init"]
 #
 # The split: the kernel and initramfs move out of the rootfs and into the UKI,
 # so shipping them twice would only cost space.
-#
-# The chicken-and-egg -- a UKI that embeds the digest of a tree it is then
-# copied into -- is resolved by /boot belonging to the deployment rather than
-# to the measured image. Nothing under /boot has to exist before the digest is
-# computed, and nothing written there afterwards can move it: composefs empties
-# /boot and /sysroot outright before hashing -- transform_for_boot() calls
-# clear() on both and resets /boot's mtime from /usr's -- so files *and*
-# directories underneath them are outside the measured tree. Both directories
-# do have to exist, or the transform errors; bootc-rootfs.sh creates them. The
-# final stage's COPY creates the EFI/Linux chain under /boot, and /boot/os4
-# alongside it.
-# Verified against bootc v1.16.9 by hashing two images differing only in
-# whether that COPY had to create the directory chain: same digest either way.
 FROM rootfs AS split
 RUN mkdir /kernel && bootc container split-kernel-and-rootfs --rootfs / --output /kernel
 
-# The tools stage. FROM builder rather than a fresh Debian: the bootc binary
-# it built is at /output/usr/bin/bootc and the libostree it links against is
-# already installed there. Nothing in this stage ships but its two output
-# directories: /out, the one signed UKI, and /diag, the build's record of what
-# it hashed and signed.
+# The UKI is not built here, and that is the whole subtlety of this variant.
 #
-# The leaf private key arrives as a BuildKit secret, mounted for the one RUN
-# and never written to a layer; both certificates are read from the split
-# rootfs itself, where the repo commits them. Signing is a plain sbsign call
-# rather than ukify's --secureboot-* options because shim verifies the leaf
-# by walking the chain up to the MOK-enrolled CA, and embedding that chain
-# (sbsign --addcert) is the part ukify cannot express. Details in the script.
+# `bootc container ukify` hashes a directory. A directory inside a build is the
+# builder's live filesystem, whose mtimes carry nanoseconds. The image that
+# filesystem is committed to carries tar, and tar has no sub-second mtime
+# field, so every timestamp a host reads back out is truncated to whole
+# seconds. The digest sealed into the UKI and the digest computed from the
+# published image therefore disagree on very nearly every inode, and bootc
+# refuses the image at install time:
 #
-# binutils is here for one objcopy call: reading the .cmdline section back out
-# of the signed UKI, so that what the verification step compares against is
-# the artifact rather than a number the build wrote down.
-FROM builder AS uki
+#   The UKI has the wrong composefs= parameter (is '29329a34...', should be
+#   '1d3dc3b0...')
+#
+# Measured, not reasoned: the dumpfile diff from the run that established this
+# was 55632 lines, and every one of them was a mtime that agreed to the second
+# and differed after the decimal point. (Exactly one differed in whole
+# seconds: /etc, because the builder creates /etc/hosts for each RUN and this
+# image ships none, so creating it moves the directory's mtime in the snapshot
+# while the committed layer keeps the parent's.)
+#
+# So the digest is computed where a host computes it -- over the committed
+# image, unpacked from its layers. build/sign-uki.sh mounts the split image
+# and runs the tools stage below against that mount. Nothing about stage
+# ordering can substitute: the only tree with the right timestamps is one that
+# has been through a tar.
+#
+# The tools stage therefore ships nothing and is never run during the build.
+# FROM builder rather than a fresh Debian: the bootc binary it built is at
+# /output/usr/bin/bootc and the libostree it links against is already
+# installed there. binutils is for one objcopy call, reading the .cmdline
+# section back out of the signed UKI.
+#
+# Signing is a plain sbsign call rather than ukify's --secureboot-* options
+# because shim verifies the leaf by walking the chain up to the MOK-enrolled
+# CA, and embedding that chain (sbsign --addcert) is the part ukify cannot
+# express. Details in build/uki-build.sh.
+FROM builder AS uki-tools
 RUN apt-get update && apt-get install -y --no-install-recommends \
       binutils sbsigntool systemd-boot-efi systemd-ukify \
  && rm -rf /var/lib/apt/lists/*
-COPY build/uki-build.sh /tmp/build/
-RUN --mount=type=bind,from=split,target=/target \
-    --mount=type=bind,from=split,source=/kernel,target=/kernel \
-    --mount=type=secret,id=sb_leaf_key \
-    /tmp/build/uki-build.sh
+COPY build/uki-build.sh /usr/local/bin/uki-build
 
-# The sealed image: the split rootfs plus its signed UKI, at the path bootc's
-# composefs install reads UKIs from. Labels, STOPSIGNAL and CMD are inherited
-# from the rootfs stage through FROM, so nothing repeats here.
+# The sealed image: the split rootfs, plus everything build/sign-uki.sh
+# produced. That directory is a /boot overlay -- EFI/Linux/<kver>.efi is the
+# signed UKI, os4/ is the build's record of what it hashed and signed -- so
+# one COPY installs both. Building this target without running sign-uki.sh
+# first fails here, which is the intended order made visible.
 #
-# /boot/os4 carries the build's own record of what it hashed and what it
-# signed -- the composefs dumpfile and the UKI's cmdline, see
-# build/uki-build.sh. It rides along for free: /boot is not measured, so the
-# files cannot shift the digest they describe, and bootc looks for boot
-# entries only under /boot/EFI/Linux and /usr/lib/modules, so a directory
-# beside them is inert. build/verify-sealed.sh reads both back out.
+# Copying into /boot cannot move the digest the UKI was sealed against:
+# composefs empties /boot and /sysroot outright before hashing --
+# transform_for_boot() calls clear() on both and resets /boot's mtime from
+# /usr's -- so files and directories underneath them are outside the measured
+# tree. Both must exist, which bootc-rootfs.sh sees to. Verified against bootc
+# v1.16.9 by hashing two images differing only in what the COPY had to create:
+# same digest either way.
+#
+# Labels, STOPSIGNAL and CMD are inherited from the rootfs stage through FROM,
+# so nothing repeats here.
 FROM split AS sealed
-COPY --from=uki /out/ /boot/EFI/Linux/
-COPY --from=uki /diag/ /boot/os4/
+COPY uki-out/ /boot/
 
 # Default target: the classic image. Stages build in dependency order but a
-# bare `docker build` produces the *last* stage, which the sealed chain above
+# bare `podman build` produces the *last* stage, which the sealed chain above
 # would otherwise have silently changed to an image that cannot upgrade an
-# ostree host -- and whose build fails without the signing secret besides.
-# This empty re-alias puts the default back. CI is explicit on both sides:
-# --target rootfs for the main tags, --target sealed for the -sealed ones.
+# ostree host -- and whose build fails without uki-out/ besides. This empty
+# re-alias puts the default back. CI is explicit throughout: --target rootfs
+# for the main tags, then split, uki-tools and sealed for the -sealed ones.
 FROM rootfs
