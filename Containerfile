@@ -286,7 +286,7 @@ RUN apt-get install -y \
       bash-completion btop curl direnv git gnupg jq less man-db neovim \
       nodejs npm podman python3 rsync skopeo uidmap unzip wget zip \
       acct openssh-server power-profiles-daemon \
-      gh glab
+      gh glab texlive-full pandoc
 
 # Anthropic's apt repository and the Claude desktop app from it. Wants curl and
 # gnupg from the step above, and like every other package step it has to stay
