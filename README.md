@@ -288,12 +288,14 @@ desktops, and `power-profiles-daemon` is what powerdevil talks to.
 
 ## What os3 has that this does not
 
-Almost everything installed here comes from the Debian archive. There are four
+Almost everything installed here comes from the Debian archive. There are five
 exceptions. Three are vendor apt repositories with a pinned signing key —
 Anthropic's, for the Claude desktop app, Google's, for Chrome, and Tailscale's,
-for the node agent — and the fourth is Discord, which publishes no repository,
-only a `.deb`. These are the os3 packages that have no Debian equivalent, left
-out of this first cut:
+for the node agent — and two are bare `.deb`s: Discord, which publishes no
+repository, and pandoc, which is in the archive but two years behind upstream
+and has no backport — see [Pandoc, and a `.deb` worth
+pinning](#pandoc-and-a-deb-worth-pinning). These are the os3 packages that
+have no Debian equivalent, left out of this first cut:
 
 | os3 | Why not here |
 | --- | --- |
@@ -473,7 +475,7 @@ that survives image updates and is invisible to them.
 
 #### Which makes it the easiest vendor package here to ship read-only
 
-The four third-party installs, on what image mode actually asks of them:
+The five third-party installs, on what image mode actually asks of them:
 
 | | Trust anchor | Lands in `/opt` | Self-update target |
 | --- | --- | --- | --- |
@@ -481,6 +483,7 @@ The four third-party installs, on what image mode actually asks of them:
 | `google-chrome-stable` | Google's key, fingerprint pinned | 431 MiB, folded into `/usr/lib/opt`; AppArmor profile re-pointed, daily cron symlink removed | apt, so the image — but `/etc/cron.daily/google-chrome` would write to a read-only `/usr/share/keyrings` |
 | `discord` | TLS to `discord.com` | No | `$HOME`, which is writable |
 | `tailscale` | Tailscale's key, fingerprint recorded — but not one Tailscale publishes | No — `/usr/bin`, `/usr/sbin` | apt, so the image — unless `--auto-update` is switched on, which shells out to `apt-get` and cannot work here |
+| `pandoc` | SHA-256 of the release `.deb`, pinned with its version | No — `/usr/bin` | None; the image |
 
 Nothing of Discord's goes to `/opt`, so there is no tree for `bootc-rootfs.sh`
 to fold and no path to re-point. Nothing writes to `/usr` after the install
@@ -601,6 +604,46 @@ the package: `enable-units.sh` uses `systemctl disable` rather than
 script — and since the helper decides by looking at that same `/etc` symlink, a
 derived image that upgrades `tailscale` sees a unit the admin disabled and
 leaves it alone.
+
+### Pandoc, and a `.deb` worth pinning
+
+trixie's `pandoc` is 3.1.11.1, released in January 2024; upstream is at 3.11.
+Nothing closes that gap from inside Debian: `trixie-backports` has no pandoc at
+all, and forky's 3.10.2 is built against forky's glibc, so pinning it the way
+`ostree-forky.sh` pins libostree would pull a second libc into the image for one
+program. Upstream publishes no apt repository either — only a `.deb` per release
+on `github.com/jgm/pandoc/releases`. So `build/pandoc.sh` installs that, and
+pandoc is the fifth thing here from outside the archive and the second bare
+package after Discord.
+
+It is the mirror image of Discord's, though. That script pins nothing because
+its `.deb` is a downloader for a program that updates itself under `$HOME`;
+pinning it would pin the wrong thing. Pandoc's `.deb` *is* the program, so the
+script pins both — the version in the URL and the SHA-256 of the file — and
+refuses to install anything else. Upstream signs neither the package nor a
+checksum list, so there is no key to fingerprint the way the three repos are;
+the hash was read off the file GitHub served when the pin was set, which puts it
+in the same class as Tailscale's fingerprint: a record of what the build first
+saw, not a second opinion about it. It still buys the property the pins exist
+for. The bytes this image installs as root cannot change without the change
+being a commit, and a scheduled `publish.yml` build cannot pick up a release
+nobody has looked at. Bumping it is two constants in one file.
+
+The package itself asks nothing of image mode. It is one 156 MiB static Haskell
+binary at `/usr/bin/pandoc`, two symlinks to it — `pandoc-lua` and
+`pandoc-server` — three man pages and a copyright file, with no maintainer
+scripts at all. Its Depends are `libc6`, `libgmp10` and `zlib1g`, all already
+here; its Suggests are TeX Live pieces `texlive-full` already covers. Nothing in
+`/opt`, nothing under `/var`, nothing that writes to `/usr` after install. It
+carries `Replaces: pandoc-data`, which only matters if Debian's own `pandoc`
+were installed first, and it is not: it comes off the archive list in the same
+step, and none of the trixie packages that recommend it are in this image.
+
+The pin is amd64 only. The image is too — `linux-image-amd64`, `qemu-system-x86`
+and the i386 multiarch for Steam all say so; the vendor repos' `Architectures:
+amd64 arm64` lines are about which indices apt fetches, not about a second
+build. Upstream does publish an arm64 `.deb`, and adding it is a second hash and
+a `case` statement, when there is a build to want it.
 
 ## Recommends are installed
 

@@ -11,11 +11,13 @@
 # from source, and the second assembles the bootable root by hand before
 # installing the desktop on it.
 #
-# Almost everything installed comes from the Debian archive. Four things do
+# Almost everything installed comes from the Debian archive. Five things do
 # not: three vendor apt repositories -- Anthropic's, for the Claude desktop
 # app, Google's, for Chrome, and Tailscale's, for the node agent -- each with
 # its signing key pinned to a fingerprint the build refuses to proceed without,
-# and Discord, which publishes no repository at all and so has no key to pin.
+# and two bare `.deb`s: Discord, which publishes no repository at all and so
+# has no key to pin, and pandoc, whose GitHub release is pinned by version and
+# SHA-256 instead because trixie's is two years old and there is no backport.
 # Tailscale's is the weakest of the three pins: it documents no fingerprint to
 # check the key against the way the other two do, so what build/tailscale.sh
 # records is simply the key the repository serves -- which at least makes a
@@ -291,7 +293,17 @@ RUN apt-get install -y \
       bash-completion btop curl direnv git gnupg jq less man-db neovim \
       nodejs npm podman python3 rsync skopeo uidmap unzip wget zip \
       acct openssh-server pkexec power-profiles-daemon \
-      gh glab texlive-full pandoc
+      gh glab texlive-full
+
+# Pandoc from the `.deb` on its GitHub release rather than the archive: trixie
+# has 3.1.11.1 and no backport, and upstream publishes no apt repository, so
+# this is the second bare package here after Discord -- but unlike Discord it is
+# the program itself and not a downloader, so build/pandoc.sh pins the version
+# and the file's SHA-256 and fails on a mismatch. Bumping it is a commit. Wants
+# curl from the step above; one static binary under /usr/bin, nothing in /opt
+# or /var, no maintainer scripts. Same constraint as every package step: ahead
+# of bootc-rootfs.sh.
+RUN /tmp/build/pandoc.sh
 
 # Anthropic's apt repository and the Claude desktop app from it. Wants curl and
 # gnupg from the step above, and like every other package step it has to stay
