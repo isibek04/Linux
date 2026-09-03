@@ -40,7 +40,7 @@ the Containerfile is the part os3 gets for free:
 | `build/bootc-rootfs.sh` | Turns the ordinary Debian root into the ostree/composefs layout. |
 | `build/apparmor-home.sh` | Teaches AppArmor's `@{HOME}` that home directories live under `/var`. |
 
-The base plumbing follows the bootcrew reference closely, with four departures
+The base plumbing follows the bootcrew reference closely, with five departures
 noted below.
 
 ### The dpkg database is moved into /usr
@@ -56,6 +56,46 @@ already keeps its rpmdb, which is why os3 never had to think about this — and
 copy under `/usr` is read-only, as everything under `/usr` is, so `apt install`
 on a deployed host still will not work. That is the point of an image-mode
 system; reading the database is what this preserves.
+
+### TeX Live's generated tree is moved into /usr too
+
+`texlive-full` is the second case of the same problem, and the bigger one.
+Debian's TeX does not ship its formats: `tex-common`'s postinst and triggers
+build them at install time into `/var/lib/texmf`, Debian's `TEXMFSYSVAR`,
+along with the assembled `fmtutil.cnf` and `updmap.cfg`, the hyphenation
+config, the merged font maps and the `ls-R` filename databases for every tree.
+None of that belongs to a package, so the file-entry generator below does not
+see it, and step 3 of `bootc-rootfs.sh` left a deployed host with the empty
+directory skeleton and nothing in it. Every pointer into the tree dangled —
+`/usr/share/texmf/ls-R`, `texmf-dist/ls-R`, both `web2c/fmtutil.cnf` and
+`web2c/updmap.cfg`, the three `language.*` files — and `pdflatex` stopped at
+"I can't find the format file".
+
+The tree is a pure function of the installed packages, which makes it image
+content that happens to live at a `/var` path. So it moves to `/usr/lib/texmf`
+and `/var/lib/texmf` becomes a symlink to it, on the dpkg pattern above. That
+is right on both paths a host reaches an image by: a fresh install gets the
+formats with everything else, and `bootc upgrade` brings the dumps that match
+the new binaries rather than leaving the previous release's in a `/var` that
+upgrades never touch. The alternative — a first-boot unit running
+`fmtutil-sys --all` — would spend on every machine, after every upgrade, the
+minutes the build has already spent once.
+
+The symlink's tmpfiles entry is `L+` rather than `L`. A host that booted the
+image before this fix has the empty directory tree at `/var/lib/texmf`, and a
+plain `L` creates its symlink only where nothing is; `L+` removes what is there
+first. The generator confines `L+` to the two paths the script itself moved,
+since those are the only ones where a directory at the path is known to be a
+leftover of this image's own layout rather than somebody's state.
+
+The cost is the same as for dpkg: `TEXMFSYSVAR` is read-only, so
+`fmtutil-sys`, `updmap-sys` and `mktexlsr` fail on a deployed host, the same
+way `apt install` does. Per-user configuration is untouched — `TEXMFVAR` and
+`TEXMFCONFIG` are under `$HOME`, which is where `fmtutil-user`, `updmap-user`
+and on-demand `mktexfmt` write — and a system-wide change is an edit under
+`/etc/texmf` followed by an image rebuild, which is where a change to `/usr`
+belongs on this system. `/usr/lib` rather than `/usr/share` because the `.fmt`
+dumps are engine- and architecture-specific.
 
 ### The /var tmpfiles entries are generated, not written
 
@@ -105,7 +145,8 @@ was actually being lost is the couple of dozen regular files left over: the
 hunspell dispatch tables under `/var/lib/dictionaries-common`, which is how
 hunspell dictionaries are found at all, `usb.ids`, `/var/lib/xkb`'s compiled
 cache marker, `tex-common`'s `fmtutil` and font-map fragments on an image that
-installs TeX. Two hundred-odd KiB of content, and every one of them silently
+installs TeX — the *inputs* to the tree the section above relocates, not the
+tree itself. Two hundred-odd KiB of content, and every one of them silently
 absent before this.
 
 It is worth fixing at that size anyway. The cost is a few hundred KiB under

@@ -3,8 +3,8 @@
 #
 # Three things happen here, in this order, and the order matters:
 #
-#   1. The dpkg database moves out of /var into /usr, because step 3 empties
-#      /var and the package database must survive.
+#   1. The dpkg database and TeX Live's generated tree move out of /var into
+#      /usr, because step 3 empties /var and both must survive.
 #   2. The /var tree the packages just built is transcribed into tmpfiles.d
 #      entries, so it can be recreated at boot -- directories and symlinks as
 #      themselves, package-shipped files through /usr/share/factory.
@@ -18,23 +18,65 @@
 set -euo pipefail
 
 # --------------------------------------------------------------------------
-# 1. Keep the dpkg database
+# 1. Keep the dpkg database, and TeX Live's generated tree
 # --------------------------------------------------------------------------
-# Fedora already keeps its rpmdb in /usr/lib/sysimage/rpm, so os3 got this for
-# free. Debian's is under /var/lib/dpkg, which step 3 would delete -- leaving a
-# deployed host unable to answer `dpkg -l` and, worse, making this image
-# useless as a base for a derived image that wants to install another package.
-# Move it into /usr and leave a symlink behind; the symlink is picked up by
-# step 2 and recreated at boot.
+# Two directories under /var hold content that is derived from the packages
+# and nothing else, and that a deployed host cannot regenerate. Both move into
+# /usr, leaving a symlink behind; the symlink is picked up by step 2 and
+# recreated at boot.
 #
-# /usr/lib/dpkg is already taken (dpkg ships its method scripts there), hence
-# /usr/lib/sysimage/dpkg, matching the rpm convention.
-if [ -d /var/lib/dpkg ] && [ ! -L /var/lib/dpkg ]; then
-  mkdir -p /usr/lib/sysimage
-  rm -rf /usr/lib/sysimage/dpkg
-  mv /var/lib/dpkg /usr/lib/sysimage/dpkg
-  ln -sT ../../usr/lib/sysimage/dpkg /var/lib/dpkg
-fi
+# Fedora already keeps its rpmdb in /usr/lib/sysimage/rpm, so os3 got the first
+# for free. Debian's is under /var/lib/dpkg, which step 3 would delete --
+# leaving a deployed host unable to answer `dpkg -l` and, worse, making this
+# image useless as a base for a derived image that wants to install another
+# package. /usr/lib/dpkg is already taken (dpkg ships its method scripts
+# there), hence /usr/lib/sysimage/dpkg, matching the rpm convention.
+#
+# The second is /var/lib/texmf, Debian's TEXMFSYSVAR. Nothing in it is shipped
+# by a package: tex-common's postinst and triggers write the whole tree from
+# the fragments under /etc/texmf and /var/lib/tex-common -- the assembled
+# fmtutil.cnf and updmap.cfg, the hyphenation config, the merged font maps,
+# the ls-R filename databases for every tree, and every engine's .fmt dump,
+# which for texlive-full is most of the size and several minutes of CPU. Step
+# 2 keeps package-shipped files, so the fragments survive; the output they
+# were assembled into does not, and step 3 leaves nothing but the empty
+# directories. TeX Live then does not work at all: /usr/share/texmf/ls-R,
+# texmf-dist/ls-R, both web2c/fmtutil.cnf and web2c/updmap.cfg and the three
+# language.* files are symlinks into /var/lib/texmf, so every one of them
+# dangles, and `pdflatex` stops at "I can't find the format file".
+#
+# The tree is a pure function of the installed packages, so it is image
+# content in all but path, and moving it under /usr is what makes it right on
+# both paths a host reaches an image by: a fresh install gets it with
+# everything else, and `bootc upgrade` carries the formats that match the new
+# binaries instead of leaving last release's dumps in a /var that upgrades do
+# not touch. Nothing on the host has to run fmtutil, which is also why this is
+# a move and not a first-boot unit: regenerating a texlive-full format set on
+# every upgrade would cost each machine the minutes the build already spent.
+#
+# The cost is that TEXMFSYSVAR is read-only, so `fmtutil-sys`, `updmap-sys`
+# and `mktexlsr` fail on a deployed host, the same way `apt install` does.
+# Per-user changes still work -- TEXMFVAR and TEXMFCONFIG are under $HOME and
+# that is where fmtutil-user, updmap-user and on-demand mktexfmt write -- and
+# a system-wide change is an edit to /etc/texmf followed by a rebuild, which
+# is where a change to a read-only /usr belongs.
+#
+# /usr/lib rather than /usr/share: the .fmt dumps are engine- and
+# architecture-specific, and nothing in Debian's TeX packaging claims
+# /usr/lib/texmf.
+relocated=()
+relocate_into_usr() {
+  local from=$1 to=$2
+  if [ -d "${from}" ] && [ ! -L "${from}" ]; then
+    mkdir -p "$(dirname "${to}")"
+    rm -rf "${to}"
+    mv "${from}" "${to}"
+    ln -sT "$(realpath --relative-to="$(dirname "${from}")" "${to}")" "${from}"
+    relocated+=("${from}")
+  fi
+}
+relocate_into_usr /var/lib/dpkg  /usr/lib/sysimage/dpkg
+relocate_into_usr /var/lib/texmf /usr/lib/texmf
 
 # Drop the package lists and .deb cache: several hundred MB of nothing, and
 # regenerating them is one `apt update` away.
@@ -115,18 +157,34 @@ out=/usr/lib/tmpfiles.d/zz-os4-var.conf
 # existing host recreates what that host has never seen. Modes and owners are
 # read from the built tree. The `C` entries copy from /usr/share/factory/var,
 # where the build put the content; `C` leaves an existing destination alone, so
-# a file a host has since edited is not overwritten.
+# a file a host has since edited is not overwritten. The `L+` entries are the
+# directories the build moved into /usr; they replace whatever an earlier
+# image left at the path.
 EOF
   # Directories, shallowest first, so a parent's mode is applied before the
   # children that systemd-tmpfiles would otherwise create it for implicitly.
   find /var -mindepth 1 -type d -printf '%d\td %p %#m %u %g -\n' \
     | sort -k1,1n | cut -f2-
-  # Symlinks: /var/lock and /var/run point into /run, and /var/lib/dpkg now
-  # points at the copy under /usr.
-  find /var -mindepth 1 -type l -printf 'L %p - - - - %l\n'
+  # Symlinks: /var/lock and /var/run point into /run, and the directories
+  # step 1 relocated now point at their copies under /usr.
+  #
+  # Those relocations get `L+`, the rest plain `L`. `L` creates the symlink
+  # only if nothing is at the path, and a host that reached an earlier image
+  # in which the same path was a directory -- as /var/lib/texmf was before
+  # step 1 covered it -- has the empty directory tree the `d` entries of that
+  # image created, which a plain `L` would leave in place forever. `L+`
+  # removes whatever is there first. Confined to the paths this script moved,
+  # because that is the one case where a directory at the path is known to be
+  # a leftover of this image's own layout and not somebody's state.
+  find /var -mindepth 1 -type l -printf '%p\t%l\n' \
+    | while IFS=$'\t' read -r p target; do
+        type=L
+        for r in "${relocated[@]}"; do [ "${p}" = "${r}" ] && type=L+; done
+        printf '%s %s - - - - %s\n' "${type}" "${p}" "${target}"
+      done
   cat "${clines}"
 } > "${out}"
-echo "Wrote $(grep -c '^d ' "${out}") directory, $(grep -c '^L ' "${out}") symlink" \
+echo "Wrote $(grep -c '^d ' "${out}") directory, $(grep -c '^L' "${out}") symlink" \
      "and $(grep -c '^C ' "${out}") file entries to ${out}"
 
 # --------------------------------------------------------------------------

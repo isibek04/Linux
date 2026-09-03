@@ -282,10 +282,15 @@ RUN apt-get install -y \
 #
 # gh and glab are both in trixie main, so they need no third-party repo. The
 # Gitea CLI still does: Debian's `tea` package is an unrelated text editor.
+#
+# texlive-full builds its formats and filename databases into /var/lib/texmf
+# from this step's postinst triggers, and nothing under /var survives
+# bootc-rootfs.sh. That script moves the tree into /usr; see its step 1 and
+# README.md before touching either.
 RUN apt-get install -y \
       bash-completion btop curl direnv git gnupg jq less man-db neovim \
       nodejs npm podman python3 rsync skopeo uidmap unzip wget zip \
-      acct openssh-server power-profiles-daemon \
+      acct openssh-server pkexec power-profiles-daemon \
       gh glab texlive-full pandoc
 
 # Anthropic's apt repository and the Claude desktop app from it. Wants curl and
