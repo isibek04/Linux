@@ -293,7 +293,7 @@ RUN apt-get install -y \
       bash-completion btop curl direnv git gnupg jq less man-db neovim \
       nodejs npm podman python3 rsync skopeo uidmap unzip wget zip \
       acct openssh-server pkexec power-profiles-daemon \
-      gh glab texlive-full
+      gh glab texlive-full bat parallel
 
 # Pandoc from the `.deb` on its GitHub release rather than the archive: trixie
 # has 3.1.11.1 and no backport, and upstream publishes no apt repository, so
