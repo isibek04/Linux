@@ -288,14 +288,17 @@ desktops, and `power-profiles-daemon` is what powerdevil talks to.
 
 ## What os3 has that this does not
 
-Almost everything installed here comes from the Debian archive. There are five
+Almost everything installed here comes from the Debian archive. There are six
 exceptions. Three are vendor apt repositories with a pinned signing key —
 Anthropic's, for the Claude desktop app, Google's, for Chrome, and Tailscale's,
-for the node agent — and two are bare `.deb`s: Discord, which publishes no
-repository, and pandoc, which is in the archive but two years behind upstream
-and has no backport — see [Pandoc, and a `.deb` worth
-pinning](#pandoc-and-a-deb-worth-pinning). These are the os3 packages that
-have no Debian equivalent, left out of this first cut:
+for the node agent — and three are bare `.deb`s: Discord, which publishes no
+repository; pandoc, which is in the archive but two years behind upstream and
+has no backport — see [Pandoc, and a `.deb` worth
+pinning](#pandoc-and-a-deb-worth-pinning); and the UDS client, which is
+published only by the VDI broker it connects to — see [The UDS client, and a
+`.deb` only its server publishes](#the-uds-client-and-a-deb-only-its-server-publishes).
+These are the os3 packages that have no Debian equivalent, left out of this
+first cut:
 
 | os3 | Why not here |
 | --- | --- |
@@ -475,7 +478,7 @@ that survives image updates and is invisible to them.
 
 #### Which makes it the easiest vendor package here to ship read-only
 
-The five third-party installs, on what image mode actually asks of them:
+The six third-party installs, on what image mode actually asks of them:
 
 | | Trust anchor | Lands in `/opt` | Self-update target |
 | --- | --- | --- | --- |
@@ -484,6 +487,7 @@ The five third-party installs, on what image mode actually asks of them:
 | `discord` | TLS to `discord.com` | No | `$HOME`, which is writable |
 | `tailscale` | Tailscale's key, fingerprint recorded — but not one Tailscale publishes | No — `/usr/bin`, `/usr/sbin` | apt, so the image — unless `--auto-update` is switched on, which shells out to `apt-get` and cannot work here |
 | `pandoc` | SHA-256 of the release `.deb`, pinned with its version | No — `/usr/bin` | None; the image |
+| `udsclient3` | SHA-256 of the broker's `.deb`, pinned with its version | No — `/usr/lib/UDSClient` | None; the image |
 
 Nothing of Discord's goes to `/opt`, so there is no tree for `bootc-rootfs.sh`
 to fold and no path to re-point. Nothing writes to `/usr` after the install
@@ -644,6 +648,55 @@ and the i386 multiarch for Steam all say so; the vendor repos' `Architectures:
 amd64 arm64` lines are about which indices apt fetches, not about a second
 build. Upstream does publish an arm64 `.deb`, and adding it is a second hash and
 a `case` statement, when there is a build to want it.
+
+### The UDS client, and a `.deb` only its server publishes
+
+UDS is Virtual Cable's OpenUDS, the VDI broker behind `uds.mondragon.edu`. Its
+web portal hands the browser a `uds://` URL when a service is clicked, and the
+client is what handles it: it asks the broker for the connection details, opens
+the tunnel and starts `xfreerdp`. Upstream publishes it nowhere — no apt
+repository, and the GitHub release for 4.0 has no assets — because the client
+ships with the broker, which serves it from `/uds/res/clients/` on its own host
+alongside a Windows installer, a Mac package, an RPM and two AppImage tarballs.
+So `build/udsclient.sh` fetches `udsclient3_4.0.0_all.deb` from
+`uds.mondragon.edu`, and the client is the sixth thing here from outside the
+archive and the third bare package after Discord and pandoc.
+
+The pin is pandoc's. The `.deb` is the program rather than a downloader for
+one, so the script holds its version and its SHA-256 and refuses anything else;
+nobody signs the file or a checksum list, so the hash is once more a record of
+what the build first saw, and the trust anchor is TLS to the broker plus that
+record. The failure mode is the useful part. The broker has redeployed the same
+4.0.0 file for years — its `Last-Modified` is well after the package's own
+changelog — and when the university upgrades the broker, the file changes and
+the scheduled build stops until the two constants are bumped. That is also the
+only notice this image gets that the broker moved, and it matters more here
+than for pandoc: a UDS broker checks the client's version and can refuse one
+that is too old, so a client that kept installing unpinned would be one that
+stopped working without a word.
+
+The package itself is the smallest of the six by a wide margin and asks nothing
+of image mode. 106 KiB, `Architecture: all`, no maintainer scripts: twenty-odd
+Python files under `/usr/lib/UDSClient`, a `.desktop` file and a doc directory.
+Its Depends are all in trixie `main` — `python3-pyqt6`, `freerdp3-x11`,
+`python3-certifi`, `python3-cryptography`, `python3-psutil`,
+`desktop-file-utils` — and apt resolves them from the indices already fetched.
+Nothing in `/opt`, nothing under `/var`; at runtime it writes the RDP files it
+generates to the temp directory and nothing else, so there is no `$HOME` state
+to speak of and nothing that reaches for a read-only `/usr`.
+
+The `.desktop` file is the one part that has to land right. It declares
+`MimeType=x-scheme-handler/uds;x-scheme-handler/udss;`, which is how the browser
+finds a handler for the portal's links, and that only takes effect once
+`update-desktop-database` has folded it into
+`/usr/share/applications/mimeinfo.cache`. `desktop-file-utils` registers a dpkg
+file trigger on `/usr/share/applications`, so installing through apt runs it at
+build time and the cache ships under `/usr` with everything else — which is why
+the trigger-owning package being a hard Depends is worth noticing, and why this
+step, like every package step, stays ahead of `bootc-rootfs.sh`. The file also
+passes `-platform xcb` on its `Exec` line, so the Qt window runs on Xwayland
+under the Plasma Wayland session rather than natively. It works, and it is
+upstream's call rather than this image's to override.
 
 ## Recommends are installed
 

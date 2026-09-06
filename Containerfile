@@ -11,13 +11,15 @@
 # from source, and the second assembles the bootable root by hand before
 # installing the desktop on it.
 #
-# Almost everything installed comes from the Debian archive. Five things do
+# Almost everything installed comes from the Debian archive. Six things do
 # not: three vendor apt repositories -- Anthropic's, for the Claude desktop
 # app, Google's, for Chrome, and Tailscale's, for the node agent -- each with
 # its signing key pinned to a fingerprint the build refuses to proceed without,
-# and two bare `.deb`s: Discord, which publishes no repository at all and so
-# has no key to pin, and pandoc, whose GitHub release is pinned by version and
-# SHA-256 instead because trixie's is two years old and there is no backport.
+# and three bare `.deb`s: Discord, which publishes no repository at all and so
+# has no key to pin; pandoc, whose GitHub release is pinned by version and
+# SHA-256 instead because trixie's is two years old and there is no backport;
+# and the UDS client, pinned the same way, from the university's VDI broker
+# because that is the only place it is published.
 # Tailscale's is the weakest of the three pins: it documents no fingerprint to
 # check the key against the way the other two do, so what build/tailscale.sh
 # records is simply the key the repository serves -- which at least makes a
@@ -304,6 +306,17 @@ RUN apt-get install -y \
 # or /var, no maintainer scripts. Same constraint as every package step: ahead
 # of bootc-rootfs.sh.
 RUN /tmp/build/pandoc.sh
+
+# The UDS client -- the OpenUDS VDI client the university's broker hands out --
+# from the `.deb` that broker serves, because upstream publishes it nowhere
+# else. Third bare package here, pinned pandoc's way: build/udsclient.sh holds
+# the version and the file's SHA-256 and fails on a mismatch, which is also how
+# a broker upgrade announces itself. Wants curl from the step above; a hundred
+# KiB of Python under /usr/lib/UDSClient and a .desktop file that registers the
+# uds:// scheme handler, whose Depends are all in trixie. No maintainer scripts,
+# nothing in /opt or /var. Same constraint as every package step: ahead of
+# bootc-rootfs.sh.
+RUN /tmp/build/udsclient.sh
 
 # Anthropic's apt repository and the Claude desktop app from it. Wants curl and
 # gnupg from the step above, and like every other package step it has to stay
