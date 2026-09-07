@@ -55,10 +55,30 @@
 # the trigger-owning package being a hard Depends matters here, and the reason
 # this step, like every package step, stays ahead of bootc-rootfs.sh.
 #
-# One thing the file says that is worth knowing rather than changing: its Exec
-# line passes `-platform xcb`, so the Qt window runs on Xwayland under the
-# Plasma Wayland session rather than natively. It works; it is upstream's call
-# and not this image's to override.
+# The Exec line is the one thing this script changes in the package, and only to
+# prepend an environment variable. The university's tunnel server,
+# udstunel.mondragon.edu:11443, serves its leaf certificate without the
+# intermediate that signed it (GEANT TLS RSA 1, under the HARICA root that
+# ca-certificates already trusts). The broker on :443 sends the full chain, the
+# tunnel does not, and Python's ssl module does not fetch missing intermediates
+# the way browsers and Windows do -- so every session died at the tunnel
+# handshake with CERTIFICATE_VERIFY_FAILED while the portal worked fine. The
+# client reads CERTIFICATE_BUNDLE_PATH and adds that file to the default trust
+# store for both its REST calls and the tunnel socket, so the .desktop file
+# gets `env CERTIFICATE_BUNDLE_PATH=...` in front of the program and the
+# intermediate ships under /usr/share/os4/udsclient from the repo, next to a
+# README saying where it came from. Scoping it to the client this way keeps the
+# system store untouched: this is a workaround for a misconfigured server, not
+# a new trust decision. The build verifies the committed file against the
+# system store before using it, and checks the Exec line is the one it expects
+# to edit, so a new .deb with a different line fails here rather than shipping
+# half-patched. Only Exec changes; MimeType is left alone, so the
+# mimeinfo.cache the dpkg trigger wrote during apt-get install stays correct.
+#
+# What stays as upstream wrote it: the same Exec line passes `-platform xcb`,
+# so the Qt window runs on Xwayland under the Plasma Wayland session rather
+# than natively. It works; it is upstream's call and not this image's to
+# override.
 set -euo pipefail
 
 version=4.0.0
@@ -88,3 +108,21 @@ echo "udsclient: installing $(dpkg-deb -f "${deb}" Version) from ${url}"
 # against the indices already fetched. No apt-get update: this step adds no
 # source. Recommends are on, as everywhere; the package declares none.
 apt-get install -y "${deb}"
+
+# Point the client at the tunnel's missing intermediate (see the header). The
+# file is checked against the system store first: it must chain to a root
+# ca-certificates trusts, or it is not the file the README describes.
+bundle=/usr/share/os4/udsclient/GEANT-TLS-RSA-1.pem
+desktop=/usr/share/applications/UDSClient.desktop
+
+openssl verify "${bundle}"
+
+expected='Exec=/usr/lib/UDSClient/UDSClient.py %u -platform xcb'
+if ! grep -qxF "${expected}" "${desktop}"; then
+  echo "udsclient: ${desktop} has no line '${expected}', refusing to edit it blind" >&2
+  grep '^Exec=' "${desktop}" >&2 || true
+  exit 1
+fi
+sed -i "s|^Exec=|Exec=env CERTIFICATE_BUNDLE_PATH=${bundle} |" "${desktop}"
+grep '^Exec=' "${desktop}"
+desktop-file-validate "${desktop}"

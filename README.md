@@ -698,6 +698,28 @@ passes `-platform xcb` on its `Exec` line, so the Qt window runs on Xwayland
 under the Plasma Wayland session rather than natively. It works, and it is
 upstream's call rather than this image's to override.
 
+The same `Exec` line does get one edit, for a fault that is the university's.
+The tunnel server the client connects to for the RDP session,
+`udstunel.mondragon.edu:11443`, serves its leaf certificate without the
+intermediate that signed it — `GEANT TLS RSA 1`, under a HARICA root that
+`ca-certificates` already trusts. The broker on `uds.mondragon.edu:443` sends
+its full chain, so the portal works; the tunnel does not, and where a browser
+or Windows would fetch the missing intermediate from the leaf's AIA URL, a
+Python `ssl` client does not, so every session died at the tunnel handshake
+with `CERTIFICATE_VERIFY_FAILED: unable to get local issuer certificate`. The
+client reads `CERTIFICATE_BUNDLE_PATH` and adds that file to the default trust
+store for both its REST calls and the tunnel socket, so `build/udsclient.sh`
+prepends `env CERTIFICATE_BUNDLE_PATH=/usr/share/os4/udsclient/GEANT-TLS-RSA-1.pem`
+to the `Exec` line, and the intermediate is committed under
+[`usr/share/os4/udsclient`](usr/share/os4/udsclient/README.md) beside a note
+on where it came from. Scoping the fix to the client keeps the system store
+untouched — it is a workaround for a misconfigured server, not a new trust
+decision — and the script verifies the committed file against the system store
+before using it, and refuses to edit an `Exec` line other than the one it
+expects, so a new `.deb` that moves the line fails the build instead of
+shipping half-patched. If the tunnel is ever configured to send its chain, the
+file becomes redundant and harmless.
+
 ## Recommends are installed
 
 Stage 2 installs with apt's recommends left on, everywhere. Debian's

@@ -314,8 +314,11 @@ RUN /tmp/build/pandoc.sh
 # a broker upgrade announces itself. Wants curl from the step above; a hundred
 # KiB of Python under /usr/lib/UDSClient and a .desktop file that registers the
 # uds:// scheme handler, whose Depends are all in trixie. No maintainer scripts,
-# nothing in /opt or /var. Same constraint as every package step: ahead of
-# bootc-rootfs.sh.
+# nothing in /opt or /var. The script then prepends CERTIFICATE_BUNDLE_PATH to
+# that .desktop file's Exec line, pointing at usr/share/os4/udsclient's copy of
+# the GEANT intermediate the university's tunnel server forgets to send -- the
+# one edit this image makes to the package, and why the COPY of usr/ above has
+# to precede it. Same constraint as every package step: ahead of bootc-rootfs.sh.
 RUN /tmp/build/udsclient.sh
 
 # Anthropic's apt repository and the Claude desktop app from it. Wants curl and
