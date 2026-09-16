@@ -269,6 +269,23 @@ RUN dpkg --add-architecture i386 \
       steam-installer \
       steam-devices
 
+# torbrowser-launcher, the other package here from contrib -- steam-installer
+# above is the first, and apt-sources.sh already enables the component for
+# both. It ships no browser itself: what installs is a downloader that fetches
+# the actual Tor Browser Bundle from the Tor Project on first run and checks it
+# against upstream's GPG signature, so unlike pandoc or the UDS client below
+# there is no release for this Containerfile to pin by version or SHA-256 --
+# the verification happens at runtime instead, against a key the package
+# ships.
+#
+# Recommends tor, so with recommends left on, as everywhere in this stage, this
+# line is also what installs the Tor daemon. Its postinst enables
+# tor.service the same way tailscaled's does below, but there is no matching
+# override here: the default torrc only opens a client SOCKS proxy on
+# 127.0.0.1:9050, not a relay, so there is no listening port on the network and
+# no login or identity to defer to a per-machine step the way tailscale's is.
+RUN apt-get install -y torbrowser-launcher
+
 # Virtualisation, as in os3. Recommends matter here: they are what give
 # virt-manager its SPICE console (gir1.2-spiceclientgtk-3.0) and qemu its
 # display and OpenGL modules, none of which is optional in practice for a
