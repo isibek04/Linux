@@ -215,7 +215,7 @@ RUN apt-get install -y \
       xdg-desktop-portal xdg-desktop-portal-gtk xdg-desktop-portal-kde \
       xdg-user-dirs \
       fonts-dejavu fonts-liberation2 fonts-noto fonts-noto-color-emoji \
-      cups cups-filters print-manager \
+      cups cups-filters print-manager printer-driver-all \
       speech-dispatcher firefox-esr
 
 # Media playback and the GPU stack. Narrower than os3's multimedia group by
