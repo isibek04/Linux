@@ -307,7 +307,7 @@ first cut:
 | `tea` | Gitea's CLI is a release binary. Debian ships a `tea` package, but it is an unrelated text editor, so the name is not usable. |
 | `uv` | Astral release binary. |
 | `nix` | Debian has `nix-bin` and `nix-setup-systemd`; skipped along with the `ostree-state-overlay@nix` unit that goes with it — which would also mean installing `ostree-boot`, since that is where the unit template lives and this image does not currently pull it in. |
-| `v4l2loopback`, `akmods` | Debian's route is `v4l2loopback-dkms` built against the image kernel at build time. Not wired up. |
+| `akmods` | Fedora's generic DKMS-alike, with no single Debian equivalent -- `v4l2loopback`, the one thing os3 uses it for, is wired up directly below instead. |
 | DNIe PKCS#11 | Upstream ships an RPM. Would need unpacking, and Debian's CA trust layout differs from Fedora's. |
 
 Each is additive — a repo, a keyring and a package name — so they can come back
@@ -719,6 +719,61 @@ before using it, and refuses to edit an `Exec` line other than the one it
 expects, so a new `.deb` that moves the line fails the build instead of
 shipping half-patched. If the tunnel is ever configured to send its chain, the
 file becomes redundant and harmless.
+
+### v4l2loopback, and a module signature that is not the UKI's
+
+`v4l2loopback-dkms` is Debian's route to a virtual camera device — the thing
+OBS or a screen-share needs to hand its output to a browser as if it were a
+webcam. `build/v4l2loopback.sh` installs `linux-headers-amd64` alongside it,
+which is what triggers the package's own postinst to build the module through
+DKMS against this image's kernel, and `v4l2loopback-utils` for
+`v4l2loopback-ctl`, the tool that configures how many devices exist and what
+they are named.
+
+An unsigned out-of-tree module is exactly what Secure Boot's lockdown refuses
+to load, though — not tainted, refused outright — on any host where lockdown
+is engaged, which is every host booted with Secure Boot on regardless of
+whose key signed the chain that got it there. So the module is signed, with
+`scripts/sign-file` (a PKCS#7 signature over the `.ko`, a different format
+from sbsign's Authenticode signature over the whole UKI) using the same
+leaf key that signs the sealed variant's UKI. That reuse is deliberate: the
+[Secure Boot](#secure-boot) section above only covers the boot chain, but the
+module's *verification* keyring is the same MOK store a host populates with
+`mokutil --import usr/share/os4/secureboot/ca.crt.der` — so a module signed
+by the leaf, which chains to that CA, needs no second key or second
+enrolment on a host that has already enrolled it for the sealed variant.
+
+That last clause is the part worth being plain about: **only** a host that
+has enrolled the os4 CA trusts this signature. A classic-tag host that has
+never needed the CA for anything — its boot chain is entirely Debian's own,
+per the section above — will refuse this module exactly as it would an
+unsigned one, until it runs the same `mokutil --import` once. Nothing here
+does that automatically; it is the same physical-presence step the sealed
+variant already documents, just now also useful off it.
+
+Signing happens in the main image build, not in the sealed variant's separate
+`sign-uki.sh` pass — a kernel module has no tar-mtime-digest problem, so
+there is nothing forcing it out of a plain `RUN`. `SB_LEAF_KEY` reaches that
+`RUN` as a build secret (`--mount=type=secret`), mounted only for the
+step and never written to a layer, the same guarantee `--mount=type=secret`
+gives publish.yml's build args. It is optional there the way it is for the
+sealed variant: unset, the module ships unsigned and a comment in the build
+log says so, which is what every PR and non-release build does; publish.yml
+supplies it for the tags that matter.
+
+One more thing had to be headed off explicitly rather than left to chance.
+Debian's `dkms` (3.2.2) tries to sign every module it builds by default, and
+finding no key at `/var/lib/dkms/mok.key` it generates one on the spot with
+`openssl req` — a real private key, written into this layer's diff, still
+recoverable from the pushed image even after `bootc-rootfs.sh` empties `/var`
+in a later layer, because OCI layers are additive history. Whether that
+happens depends on whether some earlier step happened to pull in the
+`openssl` binary — not something this build wants to depend on by accident.
+`build/v4l2loopback.sh` pre-creates both files empty before installing the
+package, so dkms finds them already present, skips generation, and its
+signing attempt fails deterministically on a garbage key instead — no
+private key material is ever generated here that this script does not
+control. The real signature, from the leaf key, replaces that failed one.
 
 ## Recommends are installed
 

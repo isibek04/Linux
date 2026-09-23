@@ -385,6 +385,16 @@ RUN /tmp/build/discord.sh
 # bootc-rootfs.sh.
 RUN /tmp/build/tailscale.sh
 
+# v4l2loopback, built against this kernel by DKMS and signed with the Secure
+# Boot leaf key so it loads under the lockdown every host engages once it has
+# enrolled usr/share/os4/secureboot's CA. See build/v4l2loopback.sh for why a
+# UKI signature and a module signature are different formats sharing one
+# trust root, and why the key is optional here the way it is for the sealed
+# variant below -- unsigned is a working image, just one where this module
+# won't load on a Secure Boot host.
+RUN --mount=type=secret,id=sb_leaf_key,target=/run/secrets/sb_leaf_key \
+    /tmp/build/v4l2loopback.sh
+
 RUN /tmp/build/initramfs.sh
 
 RUN /tmp/build/enable-units.sh

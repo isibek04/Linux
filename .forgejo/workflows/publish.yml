@@ -160,7 +160,19 @@ jobs:
             }
           done
 
+      # SB_LEAF_KEY reaches this build too, not just the sealed one below: the
+      # v4l2loopback module DKMS builds in build/v4l2loopback.sh is signed
+      # with the same leaf key the sealed variant's UKI uses (see README.md's
+      # "v4l2loopback, and a module signature that is not the UKI's"), and
+      # that step is part of the `rootfs` target, not the sealed-only stages.
+      # Unset here the same way it can be for the sealed build below -- a
+      # secret mount with an empty or absent env var yields an empty secret
+      # file, not a build failure, and build/v4l2loopback.sh treats that as
+      # "ship unsigned" rather than an error, which is what every PR build
+      # short of a release tag does.
       - name: Build image
+        env:
+          SB_LEAF_KEY: ${{ secrets.SB_LEAF_KEY }}
         run: |
           set -euo pipefail
           cd src
@@ -172,6 +184,7 @@ jobs:
             --pull \
             --format oci \
             --target rootfs \
+            --secret id=sb_leaf_key,env=SB_LEAF_KEY \
             --label "org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}" \
             --label "org.opencontainers.image.revision=${{ github.sha }}" \
             ${args} \
@@ -212,7 +225,15 @@ jobs:
 
           # The two inputs sign-uki.sh needs: the tree to seal, and the tools
           # to seal it with. Neither is published.
-          podman build --format oci --target split --tag "${split}" --file Containerfile .
+          #
+          # split reuses the rootfs stage's layers, v4l2loopback's RUN
+          # included -- the secret has to be passed again here for the same
+          # reason it is above: whether that layer gets reused from the
+          # "Build image" step's cache or rebuilt from scratch is not
+          # something this step controls, and a cache miss without the
+          # secret would sign the sealed variant's module with nothing.
+          podman build --format oci --target split --tag "${split}" \
+            --secret id=sb_leaf_key,env=SB_LEAF_KEY --file Containerfile .
           podman build --format oci --target uki-tools --tag "${tools}" --file Containerfile .
 
           # Produces uki-out/, a /boot overlay, which the sealed stage copies.
