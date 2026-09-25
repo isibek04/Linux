@@ -399,9 +399,12 @@ RUN /tmp/build/tailscale.sh
 # Boot leaf key so it loads under the lockdown every host engages once it has
 # enrolled usr/share/os4/secureboot's CA. See build/v4l2loopback.sh for why a
 # UKI signature and a module signature are different formats sharing one
-# trust root, and why the key is optional here the way it is for the sealed
-# variant below -- unsigned is a working image, just one where this module
-# won't load on a Secure Boot host.
+# trust root, why the module one has to carry the leaf certificate inside it
+# for that root to be reachable, and why the key is optional here the way it
+# is for the sealed variant below -- unsigned is a working image, just one
+# where this module won't load on a Secure Boot host. The host also has to
+# have run `mokutil --trust-mok`, which is the half of enrolment that no
+# amount of correct signing here can substitute for.
 RUN --mount=type=secret,id=sb_leaf_key,target=/run/secrets/sb_leaf_key \
     /tmp/build/v4l2loopback.sh
 

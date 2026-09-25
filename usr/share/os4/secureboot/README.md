@@ -13,7 +13,18 @@ Enrolling a machine, once, with physical presence — the DER ships in the
 image at this path precisely so a deployed host has it on hand:
 
     mokutil --import /usr/share/os4/secureboot/ca.crt.der
+    mokutil --trust-mok
     reboot    # MokManager asks the one-time password back and enrols
+
+The second line is for the kernel, not for shim, and only the v4l2loopback
+module needs it. Enrolling a certificate puts it in the kernel's `.platform`
+keyring, which covers kexec images and not modules; module signatures are
+checked against `.secondary_trusted_keys`, which the MOK certificates reach
+only through `.machine`, and `.machine` is populated only when the
+`MokListTrustedRT` variable `--trust-mok` sets is present. Skipping it costs
+nothing at boot and leaves `modprobe v4l2loopback` failing with `Key was
+rejected by service`. MokManager prompts for it separately during the same
+reboot.
 
 shim then trusts anything that chains to the CA, so UKIs are signed by the
 leaf *with the chain embedded* — the `--addcert` is what lets shim walk from

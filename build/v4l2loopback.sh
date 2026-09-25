@@ -5,14 +5,32 @@
 #
 # Two signature formats are in play and they are not the same thing.
 # build/sign-uki.sh's sbsign call is an Authenticode signature over the whole
-# UKI; this is a PKCS#7 signature over one .ko, made with the kernel's own
-# scripts/sign-file. What they share is the trust root: shim already verifies
-# the UKI by walking the leaf up to the CA every host enrols via
-# usr/share/os4/secureboot/README.md's `mokutil --import`, and lockdown's
-# module verification walks MOK-enrolled certificates the same way -- so a
-# module signed with that same leaf key needs no second enrolment. Without a
-# signature at all, a host that has enrolled the CA (and therefore has
-# lockdown's module.sig_enforce engaged) refuses to load this module outright.
+# UKI; this is a PKCS#7 signature over one .ko. What they share is the trust
+# root -- the CA every host enrols via usr/share/os4/secureboot/README.md --
+# but they reach it by different routes, and the module route has two
+# constraints the UKI route does not. Without a signature that satisfies both,
+# a host that has enrolled the CA (and therefore has lockdown's
+# module.sig_enforce engaged) refuses to load this module outright.
+#
+# First, the chain has to travel with the signature. shim walks from the leaf
+# up to the enrolled CA because `sbsign --addcert` puts the CA in the UKI's
+# certificate table. The kernel walks a chain too -- pkcs7_validate_trust_one
+# tries the last chain certificate's authority key id against the keyring --
+# but only over certificates carried inside the PKCS#7 blob, and the kernel's
+# own scripts/sign-file signs with CMS_NOCERTS: the blob it emits holds
+# nothing but the leaf's issuer-and-serial. Against a keyring holding only the
+# CA that is an immediate -ENOKEY, because the serial named in the blob is the
+# leaf's and the CA's key is indexed under its own. So the blob is built below
+# with `openssl cms -certfile`, which embeds the leaf, and sign-file is used
+# only through `-s` to append the trailer the kernel looks for.
+#
+# Second, `mokutil --import` alone does not put the CA anywhere module
+# verification looks. MOK certificates land in .platform, which covers kexec
+# and not modules; they reach .machine -- and through it
+# .secondary_trusted_keys, which is the keyring module verification searches --
+# only once MokListTrustedRT exists, which is what `mokutil --trust-mok` sets.
+# That is a host-side step, documented next to the import in
+# usr/share/os4/secureboot/README.md.
 #
 # SB_LEAF_KEY is optional here, unlike sign-uki.sh where it is required: PR
 # and non-release builds still need to produce a working image, just with an
@@ -21,6 +39,14 @@ set -euo pipefail
 
 apt-get install -y --no-install-recommends linux-headers-amd64 \
   || apt-get install -y --no-install-recommends linux-headers-generic
+
+# openssl is named here rather than relied on. The signing step below needs
+# the binary, and something earlier in the Containerfile happens to pull it in
+# today -- which is exactly the kind of dependency that breaks quietly when an
+# unrelated package step is reordered. Same reasoning as the empty mok files
+# just below: make the outcome follow from this script, not from the order of
+# the ones around it.
+apt-get install -y --no-install-recommends openssl
 
 # dkms tries to sign every module it builds by default (Debian's dkms 3.2.2,
 # unlike the shim-signed-driven scheme this used to be), auto-generating a
@@ -67,14 +93,46 @@ case "${ko}" in
 esac
 
 key=/run/secrets/sb_leaf_key
+cert=/usr/share/os4/secureboot/leaf.crt.pem
 if [ -s "${key}" ]; then
-  # scripts/sign-file lives under the headers' build symlink -- see
-  # build/uki-build.sh's comment on the same tool for why sbsign was not
-  # reused here instead: shim's chain-walk story applies to the UKI, not to
-  # module verification, but the hash algorithm still has to match what the
-  # kernel was built to check (CONFIG_MODULE_SIG_HASH=sha256 on this kernel).
-  "/usr/lib/modules/${kver}/build/scripts/sign-file" sha256 \
-    "${key}" /usr/share/os4/secureboot/leaf.crt.pem "${ko}"
+  # Every flag here is load-bearing, because pkcs7_verify checks the shape of
+  # the blob before it ever looks at the signature:
+  #
+  #   -binary        no MIME canonicalisation; the signature is over the
+  #                  module's bytes as they are.
+  #   (no -nodetach) detached, so the blob carries the signature alone and the
+  #                  module it covers stays the file the kernel reads.
+  #   -noattr        no authenticated attributes. VERIFYING_MODULE_SIGNATURE
+  #                  rejects a blob outright if have_authattrs is set -- the
+  #                  opposite of the firmware case, which requires them.
+  #   -md sha256     what this kernel was built to check
+  #                  (CONFIG_MODULE_SIG_SHA256=y on Debian's 6.12).
+  #   -certfile      the leaf, which is the whole point: it gives
+  #                  pkcs7_find_key something to match the signer against, and
+  #                  then the leaf's authority key id is the CA's subject key
+  #                  id, which is what the enrolled CA is found by.
+  #
+  # The default signer identifier is issuer-and-serial rather than -keyid, and
+  # that has to stay the default: it is what pkcs7_find_key compares against
+  # the embedded certificate. The eContentType is likewise left at openssl's
+  # default of pkcs7-data, which is the only one the module case accepts.
+  sig="$(mktemp)"
+  openssl cms -sign -binary -noattr -md sha256 \
+    -in "${ko}" \
+    -signer "${cert}" -inkey "${key}" -certfile "${cert}" \
+    -outform DER -out "${sig}"
+
+  # sign-file's `-s` path skips the key and the CMS generation entirely and
+  # does only the part that is tedious to reimplement: copy the module, append
+  # the blob, then the 12-byte struct module_signature (id_type PKEY_ID_PKCS7,
+  # big-endian length) and the "~Module signature appended~" magic. The hash
+  # name and certificate are positional placeholders it never reads in this
+  # mode; they are passed as written rather than as dummies so the line still
+  # says what was signed and with what. scripts/ reaches it through the build
+  # symlink the headers package puts under /usr/lib/modules/<ver>.
+  "/usr/lib/modules/${kver}/build/scripts/sign-file" -s "${sig}" sha256 \
+    "${cert}" "${ko}"
+  rm -f "${sig}"
   echo "v4l2loopback: signed ${ko} for ${kver}"
 else
   echo "v4l2loopback: SB_LEAF_KEY not provided -- shipping ${ko} unsigned." >&2
