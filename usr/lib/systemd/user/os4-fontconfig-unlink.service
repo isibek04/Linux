@@ -1,0 +1,22 @@
+[Unit]
+Description=Remove the fontconfig cache symlinks Chrome leaves behind
+ConditionPathIsDirectory=%C/fontconfig
+# Chrome writes a few hundred cache entries in one burst when it rebuilds its
+# cache, and os4-fontconfig-unlink.path starts this once per burst of events.
+# The default limit of five starts in ten seconds trips partway through and
+# leaves the rest of the symlinks in place, which is the one outcome this unit
+# exists to prevent.
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+# Only symlinks. Debian's fontconfig writes its caches as regular files and
+# never creates a link. Chrome's own format-12 files are regular files too, and
+# leaving them is what stops Chrome rebuilding (and relinking) on every start.
+# The pattern is quoted for find, not for a shell -- systemd does not glob.
+ExecStart=/usr/bin/find %C/fontconfig -maxdepth 1 -type l -name *.cache-* -delete
+
+[Install]
+# Also once per login, for links written while nothing was watching: before
+# this unit was enabled, or by a Chrome started outside the user manager.
+WantedBy=default.target

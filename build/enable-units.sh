@@ -56,6 +56,10 @@ else
 fi
 systemctl enable bootc-download-updates.timer
 
+# Per-user units, enabled for every account. See usr/lib/systemd/user and the
+# Chrome section of README.md for what they undo and why nothing narrower works.
+systemctl --global enable os4-fontconfig-unlink.path os4-fontconfig-unlink.service
+
 # Installed and deliberately not enabled. tailscale.sh puts the node agent in
 # the image, and the package's postinst enables tailscaled.service through
 # deb-systemd-helper -- so without this line every machine installed from this

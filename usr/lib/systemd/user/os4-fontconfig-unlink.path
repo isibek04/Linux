@@ -1,0 +1,12 @@
+[Unit]
+Description=Watch the fontconfig cache for Chrome's cache-version symlinks
+
+[Path]
+# A watch on the directory sees entries appear in it, which is all Chrome's
+# links are. systemd watches the nearest existing parent until the directory
+# itself appears, so a new account with no cache yet is covered too.
+PathChanged=%C/fontconfig
+TriggerLimitIntervalSec=0
+
+[Install]
+WantedBy=default.target

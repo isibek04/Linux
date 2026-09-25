@@ -360,6 +360,80 @@ unconditionally and writes to `/usr/share/keyrings` — read-only on a deployed
 host. Nothing runs it today, because this image installs no cron daemon; the
 symlink is removed so that stays true if one is ever added.
 
+#### Chrome's fontconfig, and a desktop that crashes an hour later
+
+A third correction is not in Chrome's packaging but in its binary, and it is
+the reason two images in a row "worked for a while" and then lost Plasma.
+
+Chrome links its own fontconfig statically, and the copy in Chrome 154 writes
+cache format 12. Trixie's libfontconfig writes format 9. Both use the same
+`~/.cache/fontconfig`. When Chrome builds its cache it writes
+`<hash>-le64.cache-12` for every font directory and then replaces the
+`-cache-9`, `-10` and `-11` entries for the same directories with symlinks to
+its own file. Trixie's fontconfig does not reject a cache whose format number
+is newer than its own, so the next program to load fonts maps a format-12 file as
+format 9. The layout differs and `FcCharSetHasChar` walks off the end:
+plasmashell dies in `QQuickText` layout three times and systemd gives up, and
+`kscreenlocker_greet` dies the same way, so the screen cannot be unlocked.
+Programs already running are unaffected; they mapped their caches at start.
+That is why the crash waits for the next login or lock after the first Chrome
+launch on a new image.
+
+A new image is what triggers it. The font directories' mtimes change with every
+build, both cache formats go stale at once, and Chrome is the first to rebuild.
+Once Chrome's format-12 files exist it leaves the `-9` names alone. The two
+formats coexist in one directory without harm, and it is only the links that do
+damage.
+
+The bug is Chromium's, tracked as
+[crbug 565132857](https://issues.chromium.org/issues/565132857), a P0 release
+blocker for M154. The links come from a change to Chromium's bundled
+fontconfig (`366787e4` in its fontconfig mirror) that assumed older readers
+could use format 12. Reports there cover system fontconfig 2.15 through 2.17
+and other programs besides Plasma (Konsole, Okular, Telegram), and reports
+elsewhere name Brave too. A Chromium engineer notes that the formats only
+diverge when Type 1 or WOFF fonts sit in fontconfig's directories. texlive-full
+puts plenty of both under `/usr/share/fonts`, which is why this image hits it
+after every rebuild.
+
+The fix is `os4-fontconfig-unlink.path` and its `.service`, per-user units
+enabled for every account. The path unit watches `~/.cache/fontconfig`, and the
+service deletes symlinks in it the moment they appear, plus once per login for
+anything left while nothing was watching. Debian's fontconfig never creates a
+link, so nothing legitimate is lost. Chrome's own format-12 files stay, so
+Chrome does not rebuild. Both start limits are off: Chrome writes a few hundred
+entries in one burst, and systemd's default of five starts in ten seconds
+stopped the cleaner halfway through when it was first tried.
+
+The units are a stopgap. Chromium has a fix in review aimed at M154 and M155.
+Once the image carries a Chrome that no longer creates the links, delete both
+units and their line in `build/enable-units.sh`. Until then they cost nothing,
+because a service with no links to delete does nothing. To check a Chrome
+version without touching the real cache:
+
+```bash
+T=$(mktemp -d)
+XDG_CACHE_HOME=$T google-chrome --headless=new --user-data-dir=$T/profile --screenshot=$T/s.png 'data:text/html,<p>x</p>'
+find $T/fontconfig -type l | wc -l
+```
+
+Anything other than 0 means the units are still needed.
+
+The obvious alternative, which is to point Chrome at a cache directory of its
+own with `FONTCONFIG_FILE` in its launcher, was tested and rejected. Every
+process Chrome starts inherits the variable. That includes `xdg-open`, which
+opens downloads in Okular or LibreOffice, and the native messaging hosts. Those
+processes then read Chrome's private directory with trixie's fontconfig and
+crash the same way. `FONTCONFIG_NO_CHECK_CACHE_VERSION`, which only Chrome's
+copy understands, does not stop the links either. The `FONTCONFIG_FILE`
+approach is also the workaround most of the upstream thread recommends, and one
+reproduction there shows Okular crashing under exactly that variable.
+
+If it happens anyway, for example on a host that has not reached this image
+yet, the way out is from a text console:
+`mv ~/.cache/fontconfig ~/.cache/fontconfig.bad && loginctl unlock-sessions`,
+then `systemctl --user restart plasma-plasmashell`.
+
 ### Steam, and why not Valve's own `.deb`
 
 `steam-installer` is in trixie `contrib`, which `apt-sources.sh` already
