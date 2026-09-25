@@ -1,8 +1,12 @@
 [Unit]
 Description=Put shim in front of systemd-boot on the ESP
 Documentation=file:///usr/libexec/os4-secureboot-esp
-# A deployed bootc host, not this image running as a container.
-ConditionPathExists=/run/ostree-booted
+# A deployed bootc host, not this image running as a container. Either marker
+# will do: the ostree backend creates /run/ostree-booted, the composefs backend
+# does not, and its only trace is the composefs= karg in the UKI's cmdline.
+# The `|` makes these two alternatives; the EFI condition below still applies.
+ConditionPathExists=|/run/ostree-booted
+ConditionKernelCommandLine=|composefs
 # Nothing to do where there is no ESP to fix. The image installs no BIOS
 # bootloader, so a machine without this is not booting from this disk anyway.
 ConditionPathExists=/sys/firmware/efi
