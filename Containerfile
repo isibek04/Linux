@@ -308,6 +308,16 @@ RUN apt-get install -y \
 # from this step's postinst triggers, and nothing under /var survives
 # bootc-rootfs.sh. That script moves the tree into /usr; see its step 1 and
 # README.md before touching either.
+#
+# acct has a smaller version of the same problem, and bootc-rootfs.sh's step 2
+# does not solve it: acct's postinst creates /var/log/account/pacct itself
+# (mkdir + touch), so the file exists in the built tree but appears in no
+# package's dpkg .list -- and the generator that turns build-time /var content
+# into boot-time tmpfiles entries only looks at .list files, on purpose, to
+# keep build residue like apt's lists out. So pacct is silently one of the
+# things that generator is supposed to lose. usr/lib/tmpfiles.d/acct.conf
+# recreates it by hand; without it accton fails with ENOENT on every host
+# because Linux's acct(2) does not create its target file, only opens it.
 RUN apt-get install -y \
       bash-completion btop curl direnv git gnupg jq less man-db neovim \
       nodejs npm podman python3 rsync skopeo uidmap unzip wget zip \
