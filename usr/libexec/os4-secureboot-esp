@@ -80,8 +80,13 @@ done
 # mount the ESP at /boot for now"), but a tpm2-luks install also gains a separate
 # XBOOTLDR partition, and which of the two lands on /boot is exactly the sort of
 # thing that should not be guessed. The GUID is unambiguous.
+#
+# `-p` is not optional. Without it blkid answers from its cache, which holds
+# filesystem tags but never the PART_ENTRY_* ones, and prints nothing with exit
+# status 0 -- so every partition read as "not an ESP" and the service failed
+# with "no EFI system partition found" on a disk that plainly has one.
 is_esp() {
-  [ -b "$1" ] && [ "$(blkid -o value -s PART_ENTRY_TYPE "$1" 2>/dev/null)" = "${ESP_GUID}" ]
+  [ -b "$1" ] && [ "$(blkid -p -o value -s PART_ENTRY_TYPE "$1" 2>/dev/null)" = "${ESP_GUID}" ]
 }
 
 find_esp() {
