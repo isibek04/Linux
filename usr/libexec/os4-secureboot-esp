@@ -104,7 +104,25 @@ find_esp() {
     fi
   done
 
-  # Not mounted. Accept a scan only if it is unambiguous -- picking one of
+  # Not mounted, which is also normal: nothing on a BLS boot adds the
+  # systemd.mount-extra karg. systemd-boot records the partition it was loaded
+  # from, though, and that is the ESP this is about even when there are others
+  # -- a dual boot with Windows has its own ESP alongside.
+  local loader_uuid
+  # UTF-16 behind a 4-byte attribute header; keeping only the UUID's own
+  # characters strips both.
+  loader_uuid="$(tr -cd '0-9A-Fa-f-' 2>/dev/null \
+    </sys/firmware/efi/efivars/LoaderDevicePartUUID-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f \
+    | tr 'A-F' 'a-f' || true)"
+  if [ -n "${loader_uuid}" ]; then
+    dev="$(readlink -f "/dev/disk/by-partuuid/${loader_uuid}" 2>/dev/null || true)"
+    if is_esp "${dev}"; then
+      printf '%s\n' "${dev}"
+      return 0
+    fi
+  fi
+
+  # No loader to ask. Accept a scan only if it is unambiguous -- picking one of
   # several ESPs on a multi-disk machine is a decision for a person.
   local -a found=()
   while read -r dev; do
@@ -197,6 +215,30 @@ log "os4-secureboot-esp: ESP ${esp_dev} at ${esp_mnt}"
 place "${SDBOOT}"     grubx64.efi
 place "${MOKMANAGER}" mmx64.efi
 place "${SHIM}"       BOOTX64.EFI
+
+# --------------------------------------------------------------------------
+# Make firmware run it
+# --------------------------------------------------------------------------
+# EFI/BOOT is only the fallback. `bootc install to-disk` also creates a
+# "Linux Boot Manager" NVRAM entry, first in BootOrder, pointing at
+# EFI/systemd/systemd-bootx64.efi -- which Secure Boot firmware refuses, and
+# then moves on to the next entry, Windows or nothing. So an entry for shim has
+# to exist too. Created only when missing, so NVRAM is written once, and
+# `efibootmgr -c` puts the new entry first. A BootOrder someone rearranges
+# afterwards is left as they made it.
+esp_partuuid="$(blkid -p -o value -s PART_ENTRY_UUID "${esp_dev}")"
+# Captured rather than piped into `grep -q`, for the SIGPIPE reason above --
+# here a false "missing" would add a duplicate entry on every boot.
+boot_entries="$(efibootmgr -v 2>/dev/null || true)"
+if ! grep -i -F "${esp_partuuid}" <<<"${boot_entries}" \
+    | grep -i -F 'File(\EFI\BOOT\BOOTX64.EFI)' >/dev/null; then
+  esp_disk="/dev/$(lsblk -n -d -o PKNAME "${esp_dev}")"
+  esp_partnum="$(blkid -p -o value -s PART_ENTRY_NUMBER "${esp_dev}")"
+  efibootmgr -q -c -d "${esp_disk}" -p "${esp_partnum}" \
+    -L "os4 (shim)" -l '\EFI\BOOT\BOOTX64.EFI'
+  log "  added NVRAM boot entry \"os4 (shim)\" for ${esp_disk} partition ${esp_partnum}, first in BootOrder"
+  changed=1
+fi
 
 if [ "${changed}" -eq 0 ]; then
   log "  already in place, nothing to do"

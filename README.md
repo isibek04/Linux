@@ -1130,6 +1130,18 @@ out is what sends shim straight to its second stage.
 which is what fires when there is no NVRAM entry at all — the
 bootc-image-builder case, where `--generic-image` implies `--no-variables`.
 
+The removable-media path alone is not enough where there *is* an NVRAM entry:
+`bootc install to-disk` creates "Linux Boot Manager", first in `BootOrder`,
+pointing at the unshimmed `EFI/systemd/systemd-bootx64.efi`, and Secure Boot
+firmware refuses it and moves on — to Windows, on a dual boot. So the script
+also adds an `os4 (shim)` entry for `EFI\BOOT\BOOTX64.EFI`, once, first in
+`BootOrder`; an order rearranged after that is left alone. Shim boots fine with
+Secure Boot off too, so the entry is safe to add before turning it on.
+
+The ESP is the one systemd-boot reports it was loaded from
+(`LoaderDevicePartUUID`), so a second ESP — Windows' own, on a dual boot — does
+not make the choice ambiguous.
+
 It has to run on the deployed host rather than in the build: the ESP does not
 exist until something installs the image to a disk, and neither
 `bootc install to-disk` nor bootc-image-builder offers a hook between laying
