@@ -83,6 +83,17 @@ systemctl --global enable os4-fontconfig-unlink.path os4-fontconfig-unlink.servi
 # package, so a missing unit means that step did not do what it says.
 systemctl disable tailscaled.service
 
+# GLPI Agent, on the same terms. glpi-agent.sh installs it with the university's
+# server already configured, and the package's postinst enables
+# glpi-agent.service the same way -- so without this every machine installed
+# from this image, test VMs included, would send its hardware, serial numbers,
+# software list and users to that server within the hour, whether or not it
+# belongs to the university's inventory. Turning it on is
+# `systemctl enable --now glpi-agent`, once per machine; the symlink is in /etc
+# and survives `bootc upgrade`, and the device ID the first run writes under
+# /var/lib/glpi-agent is host state upgrades do not touch.
+systemctl disable glpi-agent.service
+
 # New users get their home under /var/home: / is read-only and /home is a
 # symlink into /var.
 #

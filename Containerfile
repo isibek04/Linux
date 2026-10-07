@@ -11,14 +11,15 @@
 # from source, and the second assembles the bootable root by hand before
 # installing the desktop on it.
 #
-# Almost everything installed comes from the Debian archive. Five things do
+# Almost everything installed comes from the Debian archive. Six things do
 # not: three vendor apt repositories -- Anthropic's, for the Claude desktop
 # app, Google's, for Chrome, and Tailscale's, for the node agent -- each with
 # its signing key pinned to a fingerprint the build refuses to proceed without,
-# and two bare `.deb`s: pandoc, whose GitHub release is pinned by version and
+# and three bare `.deb`s: pandoc, whose GitHub release is pinned by version and
 # SHA-256 instead because trixie's is two years old and there is no backport;
-# and the UDS client, pinned the same way, from the university's VDI broker
-# because that is the only place it is published.
+# the UDS client, pinned the same way, from the university's VDI broker
+# because that is the only place it is published; and GLPI Agent, pinned the
+# same way from its GitHub release, because trixie does not package it.
 # Tailscale's is the weakest of the three pins: it documents no fingerprint to
 # check the key against the way the other two do, so what build/tailscale.sh
 # records is simply the key the repository serves -- which at least makes a
@@ -294,6 +295,18 @@ RUN /tmp/build/pandoc.sh
 # one edit this image makes to the package, and why the COPY of usr/ above has
 # to precede it. Same constraint as every package step: ahead of bootc-rootfs.sh.
 RUN /tmp/build/udsclient.sh
+
+# GLPI Agent, the inventory agent the university's IT asks every machine to
+# run, from the `.deb` on its GitHub release: trixie does not package it and
+# upstream publishes no apt repository. Third bare package here, pinned
+# pandoc's way in build/glpi-agent.sh, which also writes the university's
+# server into /etc/glpi-agent/conf.d. IT's own script does the same with
+# upstream's installer, which runs apt on the host and cannot work on a
+# read-only /usr. Its postinst enables glpi-agent.service; enable-units.sh
+# disables it again, so reporting is a per-machine opt-in. Wants curl from the
+# step above. Same constraint as every package step: ahead of bootc-rootfs.sh,
+# which turns its empty /var/lib/glpi-agent into a tmpfiles entry.
+RUN /tmp/build/glpi-agent.sh
 
 # Anthropic's apt repository and the Claude desktop app from it. Wants curl and
 # gnupg from the step above, and like every other package step it has to stay

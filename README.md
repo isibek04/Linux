@@ -288,14 +288,16 @@ desktops, and `power-profiles-daemon` is what powerdevil talks to.
 
 ## What os3 has that this does not
 
-Almost everything installed here comes from the Debian archive. There are five
+Almost everything installed here comes from the Debian archive. There are six
 exceptions. Three are vendor apt repositories with a pinned signing key —
 Anthropic's, for the Claude desktop app, Google's, for Chrome, and Tailscale's,
-for the node agent — and two are bare `.deb`s: pandoc, which is in the archive
+for the node agent — and three are bare `.deb`s: pandoc, which is in the archive
 but two years behind upstream and has no backport — see [Pandoc, and a `.deb`
-worth pinning](#pandoc-and-a-deb-worth-pinning); and the UDS client, which is
+worth pinning](#pandoc-and-a-deb-worth-pinning); the UDS client, which is
 published only by the VDI broker it connects to — see [The UDS client, and a
-`.deb` only its server publishes](#the-uds-client-and-a-deb-only-its-server-publishes).
+`.deb` only its server publishes](#the-uds-client-and-a-deb-only-its-server-publishes);
+and GLPI Agent, which trixie does not package at all — see [GLPI Agent, and an
+inventory that is opt-in per machine](#glpi-agent-and-an-inventory-that-is-opt-in-per-machine).
 These are the os3 packages that have no Debian equivalent, left out of this
 first cut:
 
@@ -436,7 +438,7 @@ then `systemctl --user restart plasma-plasmashell`.
 
 ### The third-party installs, side by side
 
-What image mode actually asks of each of the five:
+What image mode actually asks of each of the six:
 
 | | Trust anchor | Lands in `/opt` | Self-update target |
 | --- | --- | --- | --- |
@@ -445,6 +447,7 @@ What image mode actually asks of each of the five:
 | `tailscale` | Tailscale's key, fingerprint recorded — but not one Tailscale publishes | No — `/usr/bin`, `/usr/sbin` | apt, so the image — unless `--auto-update` is switched on, which shells out to `apt-get` and cannot work here |
 | `pandoc` | SHA-256 of the release `.deb`, pinned with its version | No — `/usr/bin` | None; the image |
 | `udsclient3` | SHA-256 of the broker's `.deb`, pinned with its version | No — `/usr/lib/UDSClient` | None; the image |
+| `glpi-agent` | SHA-256 of the release `.deb`, pinned with its version | No — `/usr/share/glpi-agent`; empty `/var/lib/glpi-agent` becomes a tmpfiles entry | None; the image |
 
 ### Tailscale, and a daemon that ships disabled
 
@@ -651,6 +654,66 @@ before using it, and refuses to edit an `Exec` line other than the one it
 expects, so a new `.deb` that moves the line fails the build instead of
 shipping half-patched. If the tunnel is ever configured to send its chain, the
 file becomes redundant and harmless.
+
+### GLPI Agent, and an inventory that is opt-in per machine
+
+GLPI is the asset-inventory system the university's IT runs at
+`eaz-mgep.mondragon.edu`, and GLPI Agent is what reports a machine to it:
+hardware and serial numbers, installed software, network interfaces, users.
+IT's instructions are a shell script that fetches upstream's
+`glpi-agent-<version>-linux-installer.pl` from the latest GitHub release and
+runs it as root with `--server` and `--install`. That installer is a
+self-extracting Perl script carrying the same `.deb`s published beside it on
+the release, and on Debian it installs them through apt — which on a deployed
+host means writing to a read-only `/usr`, so it cannot work here.
+`build/glpi-agent.sh` does the same thing at build time instead, from
+`glpi-agent_<version>-1_all.deb` directly, and the agent is the sixth thing
+here from outside the archive and the third bare package.
+
+trixie has no `glpi-agent`; what Debian still ships is its predecessor,
+`fusioninventory-agent`, which upstream no longer maintains. The pin is
+pandoc's: version and SHA-256 are constants, and anything else stops the
+build. Where IT's script resolves "latest" every time it runs, a new release
+here is a commit. GitHub records a digest for each release asset and the pinned
+one matched it, but that is GitHub vouching for what it stored, not upstream
+signing anything, so the hash is once more a record of what the build first
+saw. Only the core package is installed — the release's `-task-network`,
+`-deploy`, `-collect` and `-esx` packages are left out, as the installer's
+default does: local inventory is the only task IT asks for.
+
+What image mode asks of it is small. 4 MiB, `Architecture: all`, Perl modules
+under `/usr/share/glpi-agent` and a handful of programs; the Depends are all in
+trixie `main`. Two of its Recommends matter — `libio-socket-ssl-perl`, without
+which it cannot talk to an https server at all (the script checks for it), and
+`dmidecode`, where serial numbers and BIOS data come from. The postinst copies
+the default configs into `/etc/glpi-agent` with `ucf`, so they ship as `/etc`
+defaults; `ucf`'s registry under `/var/lib/ucf` belongs to no package and does
+not survive `bootc-rootfs.sh`, which only matters to a derived image upgrading
+the package with apt. `/var/lib/glpi-agent` is an empty directory in the
+package, so the generated tmpfiles entries recreate it; it is where the agent
+keeps its device ID, which the first run writes — nothing in the build runs
+the agent, so the image ships no ID.
+
+The server URL — the one thing taken from IT's script, since its
+`NO_SSL_CHECK=0` is already the default — goes into
+`/etc/glpi-agent/conf.d/os4-server.cfg`, which `agent.cfg` includes and which
+package upgrades leave alone. The server sends its full chain to a HARICA root
+in `ca-certificates`, so unlike the UDS tunnel there is nothing to work around.
+
+The daemon ships disabled, for the reason `tailscaled` does and one more. The
+postinst enables `glpi-agent.service`; left that way, every machine installed
+from this image — test VMs included — would report its inventory to the
+university within the hour, whether or not it belongs in that inventory.
+`enable-units.sh` turns it off, and a machine that should be reported opts in
+once:
+
+```sh
+sudo systemctl enable --now glpi-agent
+```
+
+The symlink is in `/etc` and survives `bootc upgrade`. `sudo glpi-agent` sends
+one inventory immediately instead of waiting for the daemon's first,
+randomised run.
 
 ### v4l2loopback, and a module signature that is not the UKI's
 
