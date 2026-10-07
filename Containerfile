@@ -228,64 +228,6 @@ RUN apt-get install -y \
       obs-studio \
       mangohud
 
-# Steam, and the i386 multiarch it needs.
-#
-# The client is still a 32-bit program -- steamwebhelper above all -- so the
-# 32-bit halves of mesa, Vulkan and VA-API have to be present even to play
-# 64-bit games, and that means telling dpkg about i386 before apt is asked for
-# anything. The architecture is recorded in /var/lib/dpkg/arch, which
-# bootc-rootfs.sh moves into /usr with the rest of the dpkg database, so a
-# deployed host still knows about it and can still resolve :i386 packages.
-#
-# Adding the architecture makes apt fetch a second set of indices for every
-# source that does not say otherwise -- the Debian entries and the forky pin,
-# all of which publish i386. It stays enabled for every apt run below, which is
-# what makes the two vendor repositories' `Architectures: amd64 arm64` load
-# bearing: without it, the apt-get update inside claude-desktop.sh and
-# google-chrome.sh would ask dl.google.com and downloads.claude.ai for i386
-# indices neither of them publishes.
-#
-# steam-installer is in contrib, which apt-sources.sh already enables;
-# steam-libs, steam-libs-i386 and steam-devices are in main. Nothing here comes
-# from non-free, so the component list is unchanged.
-#
-# Recommends are on, as everywhere, and they matter more here than usual:
-# mesa-vulkan-drivers:i386, va-driver-all:i386 and libsdl2-2.0-0:i386 are all
-# recommends of steam-libs rather than depends, and without them the client
-# runs without 32-bit Vulkan or hardware video decode. The bill is about 494
-# MiB of i386 packages, of which libllvm19:i386 (143 MiB),
-# mesa-vulkan-drivers:i386 (83 MiB) and mesa-libgallium:i386 (44 MiB) are the
-# bulk: a second, 32-bit copy of the GPU stack the step above installed.
-#
-# steam-devices is a steam-libs recommend and would arrive anyway; it is named
-# because it is the half that is useful on its own -- udev rules for
-# controllers, VR headsets and the Steam Deck -- and because a future
-# --no-install-recommends here should not silently drop it.
-#
-# Debian's package rather than Valve's own .deb, and why, is in README.md.
-RUN dpkg --add-architecture i386 \
- && apt-get update \
- && apt-get install -y \
-      steam-installer \
-      steam-devices
-
-# torbrowser-launcher, the other package here from contrib -- steam-installer
-# above is the first, and apt-sources.sh already enables the component for
-# both. It ships no browser itself: what installs is a downloader that fetches
-# the actual Tor Browser Bundle from the Tor Project on first run and checks it
-# against upstream's GPG signature, so unlike pandoc or the UDS client below
-# there is no release for this Containerfile to pin by version or SHA-256 --
-# the verification happens at runtime instead, against a key the package
-# ships.
-#
-# Recommends tor, so with recommends left on, as everywhere in this stage, this
-# line is also what installs the Tor daemon. Its postinst enables
-# tor.service the same way tailscaled's does below, but there is no matching
-# override here: the default torrc only opens a client SOCKS proxy on
-# 127.0.0.1:9050, not a relay, so there is no listening port on the network and
-# no login or identity to defer to a per-machine step the way tailscale's is.
-RUN apt-get install -y torbrowser-launcher
-
 # Virtualisation, as in os3. Recommends matter here: they are what give
 # virt-manager its SPICE console (gir1.2-spiceclientgtk-3.0) and qemu its
 # display and OpenGL modules, none of which is optional in practice for a
@@ -370,17 +312,6 @@ RUN /tmp/build/claude-desktop.sh
 # the AppArmor profile at the path it will actually have. Same constraint as
 # every package step: it has to stay ahead of bootc-rootfs.sh.
 RUN /tmp/build/google-chrome.sh
-
-# Discord, from the vendor `.deb` -- no repository, so no signing key to pin,
-# which makes it the weakest of the three third-party installs and the one
-# README.md is most explicit about. The download is 2 MiB and contains no
-# Discord: the package is a launcher plus an updater bootstrap that fetches the
-# application into ~/.config/discord on first run, the same arrangement
-# Debian's steam-installer uses. Nothing of it lands in /opt, and its
-# self-updates land in $HOME rather than in a read-only /usr, so this is the
-# rare vendor package that needs no image-mode correction at all. Same
-# constraint as every package step: ahead of bootc-rootfs.sh.
-RUN /tmp/build/discord.sh
 
 # Tailscale's apt repository and the node agent from it, on the terms the first
 # two vendor repos set: a key fetched, its fingerprint checked, this image's own
