@@ -1,0 +1,148 @@
+name: Build Disk Image
+
+# Manual-only: builds an installable disk image from a published container
+# image and uploads it to the Hetzner object storage bucket.
+#
+# os3's equivalent workflow builds an anaconda-iso. That is not an option here:
+# anaconda is Fedora's installer and knows nothing about a Debian root, so
+# there is no installer ISO to produce. A raw or qcow2 disk image is the
+# portable alternative -- write the raw one to a disk with dd, or boot the
+# qcow2 under a hypervisor.
+#
+# bootc-image-builder's Debian support is untested by upstream; if the build
+# fails here rather than in the image, that is the likely reason, and
+# `bootc install to-disk` run from the image itself is the fallback.
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 'Tag of the published container image to build from'
+        required: false
+        default: 'main'
+      disk_type:
+        description: 'Disk image format to produce'
+        required: false
+        default: 'qcow2'
+        type: choice
+        options: [ qcow2, raw, vmdk ]
+
+concurrency:
+  group: build-disk
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  # Pulling the image from ghcr.io while the package is private.
+  packages: read
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository_owner }}/os4
+  REGISTRY_AUTH_FILE: /tmp/os4-auth-${{ github.run_id }}/auth.json
+  S3_ENDPOINT: nbg1.your-objectstorage.com
+  S3_BUCKET: sebz-me-storage
+  S3_PREFIX: artifacts/os4
+
+# Rootful throughout: bootc-image-builder needs a privileged container with
+# loop devices, and it reads the image out of the host's own root store,
+# which is the documented way to run it.
+defaults:
+  run:
+    shell: sudo --preserve-env bash --noprofile --norc -euo pipefail {0}
+
+jobs:
+  disk:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+
+    steps:
+      # Same reasoning as publish.yml: the image alone is ~11 GB and the disk
+      # built from it is as large again, so the store and the output both go
+      # to /mnt, the runner's second disk.
+      - name: Make room on the runner
+        run: |
+          rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                 /usr/local/.ghcup /opt/hostedtoolcache /usr/local/share/boost \
+                 /usr/share/swift /usr/local/share/powershell /opt/microsoft || true
+          docker system prune -af >/dev/null 2>&1 || true
+          mkdir -p /mnt/containers /mnt/output /var/lib/containers
+          mount --bind /mnt/containers /var/lib/containers
+          # osbuild attaches loop devices.
+          modprobe loop || true
+          df -h / /mnt
+
+      - name: Resolve image reference
+        id: ref
+        run: |
+          tag="${{ inputs.image_tag }}"
+          tag="${tag:-main}"
+          type="${{ inputs.disk_type }}"
+          type="${type:-qcow2}"
+          case "$type" in
+            qcow2|raw|vmdk) ;;
+            *) echo "Unsupported disk_type: $type" >&2; exit 1 ;;
+          esac
+          image="${REGISTRY}/${IMAGE_NAME}"
+          image="$(echo "$image" | tr '[:upper:]' '[:lower:]'):${tag}"
+          echo "image=${image}" >> "$GITHUB_OUTPUT"
+          echo "type=${type}" >> "$GITHUB_OUTPUT"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "Building ${type} from ${image}"
+
+      - name: Pull image
+        env:
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p "$(dirname "${REGISTRY_AUTH_FILE}")"
+          printf '%s' "${REGISTRY_TOKEN}" \
+            | podman login "${REGISTRY}" --username "${{ github.actor }}" --password-stdin
+          podman pull "${{ steps.ref.outputs.image }}"
+
+      - name: Build disk image
+        run: |
+          podman run --rm --privileged \
+            --security-opt label=type:unconfined_t \
+            -v /var/lib/containers/storage:/var/lib/containers/storage \
+            -v /mnt/output:/output \
+            quay.io/centos-bootc/bootc-image-builder:latest \
+            --type "${{ steps.ref.outputs.type }}" \
+            "${{ steps.ref.outputs.image }}"
+
+          find /mnt/output -type f -printf '%s\t%p\n' | sort -rn | head
+
+      - name: Upload to object storage
+        env:
+          S3_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
+          S3_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
+        run: |
+          type="${{ steps.ref.outputs.type }}"
+          tag="${{ steps.ref.outputs.tag }}"
+
+          # bootc-image-builder lays its output out per type: qcow2/disk.qcow2,
+          # image/disk.raw, vmdk/disk.vmdk. Find it rather than guessing.
+          disk="$(find /mnt/output -type f -name "disk.*" | head -n1)"
+          if [ -z "$disk" ]; then
+            echo "No disk image produced" >&2
+            find /mnt/output -type f >&2
+            exit 1
+          fi
+
+          name="os4-${tag}-$(date -u +%Y%m%d-%H%M%S)-${GITHUB_SHA::7}.${type}"
+          dir="$(dirname "$disk")"
+          mv "$disk" "${dir}/${name}"
+          ( cd "$dir" && sha256sum "${name}" > "${name}.sha256" )
+
+          # mc rather than the aws CLI: it multiparts large files automatically
+          # and does not send the newer AWS checksum headers that Hetzner's
+          # Ceph-based object storage rejects.
+          upload() {
+            podman run --rm \
+              -v "${dir}:/data:ro" \
+              -e MC_HOST_s3="https://${S3_ACCESS_KEY_ID}:${S3_SECRET_ACCESS_KEY}@${S3_ENDPOINT}" \
+              quay.io/minio/mc:latest \
+              cp "/data/$1" "s3/${S3_BUCKET}/${S3_PREFIX}/$1"
+          }
+          upload "${name}"
+          upload "${name}.sha256"
+          echo "Uploaded s3://${S3_BUCKET}/${S3_PREFIX}/${name}"

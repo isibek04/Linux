@@ -18,68 +18,82 @@ concurrency:
   group: publish-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+  # Pushing to ghcr.io with the run's own token.
+  packages: write
+  # Keyless cosign: the run's OIDC token is what Fulcio issues the signing
+  # certificate against. Nothing else in the workflow uses it.
+  id-token: write
+
 env:
-  REGISTRY: git.sebz.me
-  IMAGE_NAME: ${{ github.repository }}
+  REGISTRY: ghcr.io
+  # Named for the image, not the repository: the package is `os4` under the
+  # repository owner, whatever the repository itself is called. Lowercased in
+  # the meta step, since ghcr.io refuses uppercase and owners may have it.
+  IMAGE_NAME: ${{ github.repository_owner }}/os4
   # Every registry client in this workflow reads its credentials from here.
-  # Not the default under $HOME: the runner executes in host mode with HOME
-  # unset, so anything resolving `${HOME}/...` under `set -u` aborts the step
-  # with "HOME: unbound variable". An explicit path removes the question.
-  # podman and skopeo both honour this variable.
+  # podman and skopeo both honour this variable, and the default shell below
+  # carries it through sudo.
   REGISTRY_AUTH_FILE: /tmp/os4-auth-${{ github.run_id }}/auth.json
+
+# Every podman and skopeo call in this job runs as root, so every `run:` does.
+# Rootful because two things here cannot work rootless: build/verify-sealed.sh
+# hands the store to a --privileged container that remounts its overlay, and
+# the storage itself is moved onto /mnt below, which is a mount only root can
+# make. --preserve-env keeps the step's env (secrets, REGISTRY_AUTH_FILE,
+# GITHUB_OUTPUT) across the sudo; sudo's secure_path still resets PATH, which
+# is why the cosign step, whose binary the installer action puts on the
+# runner user's PATH, opts back out to plain bash.
+defaults:
+  run:
+    shell: sudo --preserve-env bash --noprofile --norc -euo pipefail {0}
 
 jobs:
   build:
-    # Runs directly on the ephemeral Hetzner runner host (`hetzner-host`
-    # label) and builds with the host's podman. Not nested podman, which is
-    # what failed before: forge-autoscale's job containers are docker/runc
-    # with the default seccomp profile, blocking the user-namespace clone
-    # nested podman needs ("cannot clone: Operation not permitted / cannot
-    # re-exec process"). In host mode there is no container to nest inside.
+    # A GitHub-hosted runner, built with its own podman. podman rather than
+    # docker because every image here has to reach containers-storage in the
+    # end -- it is the only store bootc reads, both for the verification below
+    # and for the digest the sealed variant is built around. Going through the
+    # docker daemon means a conversion on the way out (Docker schema 2 into an
+    # OCI reader, which bootc fails on) and an image-sized copy to get it
+    # there. podman builds into that store directly, and it is what this repo
+    # is developed against locally, which is worth more than it sounds: the
+    # mtime bug the sealed variant is built around hid for three runs behind
+    # exactly that difference.
     #
-    # podman rather than docker because every image here has to reach
-    # containers-storage in the end -- it is the only store bootc reads, both
-    # for the verification below and for the digest the sealed variant is
-    # built around. Going through the docker daemon means a conversion on the
-    # way out (Docker schema 2 into an OCI reader, which bootc fails on) and
-    # an image-sized copy to get it there. podman builds into that store
-    # directly, and it is what this repo is developed against locally, which
-    # is worth more than it sounds: the mtime bug the sealed variant is built
-    # around hid for three runs behind exactly that difference.
-    #
-    # Host mode has no node, so no JS actions here — the repo is cloned by
-    # hand.
-    runs-on: hetzner-host
+    # Ubuntu 24.04 ships podman and skopeo in the runner image, so nothing is
+    # installed for them. Each run starts from an empty store, so nothing is
+    # cached between builds either: bootc compiles and texlive-full installs
+    # from scratch every time.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
 
     steps:
-      - name: Clone repository
-        env:
-          # Fail fast instead of prompting on the job's pseudo-terminal —
-          # an unauthenticated fetch of this private repo otherwise hangs
-          # forever on an invisible username prompt.
-          GIT_TERMINAL_PROMPT: '0'
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      # The image is ~11 GB, the sealed variant reuses most of it, and
+      # verify-sealed.sh writes an image-sized composefs repo on top. The
+      # runner's root filesystem has nowhere near that free out of the box.
+      # Two things make room: the preinstalled toolchains nothing here uses
+      # come off /, which is where TMPDIR (/var/tmp) and therefore both
+      # scripts' scratch space lives; and the container store moves to /mnt,
+      # the runner's second disk, which is otherwise idle.
+      - name: Make room on the runner
         run: |
-          set -euo pipefail
-          rm -rf src
-          git init -q src
-          cd src
-          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
-          # The repo is private: authenticate with the run's token, the same
-          # way actions/checkout does.
-          auth="$(printf 'x-access-token:%s' '${{ github.token }}' | base64 -w0)"
-          if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
-            ref="refs/pull/${{ github.event.pull_request.number }}/head"
-          else
-            ref="${GITHUB_REF}"
-          fi
-          git -c http.extraheader="Authorization: Basic ${auth}" \
-            fetch -q --depth=1 origin "$ref"
-          git checkout -q FETCH_HEAD
+          df -h / /mnt
+          rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                 /usr/local/.ghcup /opt/hostedtoolcache /usr/local/share/boost \
+                 /usr/share/swift /usr/local/share/powershell /opt/microsoft || true
+          docker system prune -af >/dev/null 2>&1 || true
+          mkdir -p /mnt/containers /var/lib/containers
+          mount --bind /mnt/containers /var/lib/containers
+          df -h / /mnt
 
       - name: Compute image tags
         id: meta
         run: |
-          set -euo pipefail
           image="${REGISTRY}/${IMAGE_NAME}"
           image="$(echo "$image" | tr '[:upper:]' '[:lower:]')"
           tags=""
@@ -120,46 +134,6 @@ jobs:
           echo "sealed_tags=${sealed}" >> "$GITHUB_OUTPUT"
           echo "Resolved sealed tags: ${sealed}"
 
-      # skopeo is what pushes; podman is what builds, signs and verifies. The
-      # runner snapshot should carry both (CI/scripts/provision-runner.sh);
-      # this installs them anyway, for a VM booted from a snapshot predating
-      # that change. Output is not swallowed: a silent apt failure here would
-      # otherwise read as a bare "required", which says nothing about why.
-      #
-      # First step of the job that needs either, so one missing tool is
-      # reported once, and before an 11 GB build rather than after.
-      - name: Ensure podman and skopeo are present
-        run: |
-          set -euo pipefail
-          missing=""
-          for t in podman skopeo; do
-            command -v "$t" >/dev/null 2>&1 || missing="${missing} $t"
-          done
-          if [ -n "${missing}" ]; then
-            echo "Not on the runner --${missing}. Installing."
-            sudo=""
-            [ "$(id -u)" -eq 0 ] || sudo=sudo
-            export DEBIAN_FRONTEND=noninteractive
-            if command -v apt-get >/dev/null 2>&1; then
-              $sudo apt-get update -q || true
-              # shellcheck disable=SC2086
-              $sudo apt-get install -yq ${missing} || true
-            elif command -v dnf >/dev/null 2>&1; then
-              # shellcheck disable=SC2086
-              $sudo dnf install -y ${missing} || true
-            fi
-          fi
-          for t in podman skopeo; do
-            command -v "$t" >/dev/null 2>&1 || {
-              echo "${t} is required and could not be installed." >&2
-              echo "podman builds every image here and is what bootc reads its" >&2
-              echo "store through; skopeo pushes, because podman push cannot be" >&2
-              echo "held to OCI media types and bootc cannot install anything" >&2
-              echo "else. Add both to the runner snapshot." >&2
-              exit 1
-            }
-          done
-
       # SB_LEAF_KEY reaches this build too, not just the sealed one below: the
       # v4l2loopback module DKMS builds in build/v4l2loopback.sh is signed
       # with the same leaf key the sealed variant's UKI uses (see README.md's
@@ -168,14 +142,12 @@ jobs:
       # Unset here the same way it can be for the sealed build below -- a
       # secret mount with an empty or absent env var yields an empty secret
       # file, not a build failure, and build/v4l2loopback.sh treats that as
-      # "ship unsigned" rather than an error, which is what every PR build
-      # short of a release tag does.
+      # "ship unsigned" rather than an error, which is what a pull request
+      # from a fork, which gets no secrets, does.
       - name: Build image
         env:
           SB_LEAF_KEY: ${{ secrets.SB_LEAF_KEY }}
         run: |
-          set -euo pipefail
-          cd src
           args=""
           for t in ${{ steps.meta.outputs.tags }}; do
             args="${args} --tag ${t}"
@@ -204,22 +176,19 @@ jobs:
       # build/sign-uki.sh is what runs the tools against a mounted copy of the
       # committed image.
       #
-      # Skipped when SB_LEAF_KEY is unset, the same arrangement signing has
-      # with COSIGN_PRIVATE_KEY -- secrets-in-if is not expression-safe, so
-      # the emptiness check lives in the step and later steps key off the
-      # `built` output.
+      # Skipped when SB_LEAF_KEY is unset -- secrets-in-if is not
+      # expression-safe, so the emptiness check lives in the step and later
+      # steps key off the `built` output.
       - name: Build sealed image
         id: sealed
         env:
           SB_LEAF_KEY: ${{ secrets.SB_LEAF_KEY }}
         run: |
-          set -euo pipefail
           if [ -z "${SB_LEAF_KEY}" ]; then
             echo "SB_LEAF_KEY not set -- skipping the sealed variant."
             echo "built=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          cd src
           split="os4-split:${{ github.run_id }}"
           tools="os4-uki-tools:${{ github.run_id }}"
 
@@ -273,14 +242,12 @@ jobs:
       # the more expensive failure.
       #
       # Not free: hashing writes every file object into a throwaway composefs
-      # repo, so it wants image-sized scratch space. See
-      # build/verify-sealed.sh.
+      # repo, so it wants image-sized scratch space -- which is what the
+      # cleanup of / at the top of the job is for. See build/verify-sealed.sh.
       - name: Verify the sealed image is installable
         id: verify
         if: steps.sealed.outputs.built == 'true'
         run: |
-          set -euo pipefail
-          cd src
           set -- ${{ steps.meta.outputs.sealed_tags }}
           if [ "$#" -eq 0 ]; then
             echo "No sealed tags resolved for this event -- nothing to verify."
@@ -293,14 +260,16 @@ jobs:
             echo "ok=false" >> "$GITHUB_OUTPUT"
           fi
 
-      # PRs build only -- no push, matching the GitHub workflow's behaviour.
+      # PRs build only -- no push.
       - name: Log in to ${{ env.REGISTRY }}
         if: github.event_name != 'pull_request'
+        env:
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           mkdir -p "$(dirname "${REGISTRY_AUTH_FILE}")"
-          echo "${{ secrets.REGISTRY_TOKEN }}" \
+          printf '%s' "${REGISTRY_TOKEN}" \
             | podman login "${REGISTRY}" \
-                --username "${{ secrets.REGISTRY_USER }}" \
+                --username "${{ github.actor }}" \
                 --password-stdin
 
       # Pushed with skopeo, not `podman push`, because the media types matter.
@@ -326,7 +295,6 @@ jobs:
         id: push
         if: github.event_name != 'pull_request'
         run: |
-          set -euo pipefail
           auth="${REGISTRY_AUTH_FILE}"
           digestfile="$(mktemp)"
 
@@ -359,7 +327,6 @@ jobs:
         id: push_sealed
         if: github.event_name != 'pull_request' && steps.verify.outputs.ok == 'true'
         run: |
-          set -euo pipefail
           auth="${REGISTRY_AUTH_FILE}"
           digestfile="$(mktemp)"
 
@@ -386,42 +353,42 @@ jobs:
           echo "Pushed ${digest} as: ${first} $*"
           echo "digest=${digest}" >> "$GITHUB_OUTPUT"
 
-      # Keyless cosign is not available on Forgejo: it needs a Fulcio-trusted
-      # OIDC issuer, which Forgejo Actions does not provide. Signing therefore
-      # uses a key pair. Skipped automatically when COSIGN_PRIVATE_KEY is unset.
+      - name: Install cosign
+        if: github.event_name != 'pull_request' && steps.push.outputs.digest != ''
+        uses: sigstore/cosign-installer@v3
+
+      # Keyless: no key pair and no secret. cosign trades the run's OIDC token
+      # for a short-lived Fulcio certificate naming this workflow, this
+      # repository and the ref it ran on, signs with it, and records the
+      # signature in the public Rekor log. Verifying means naming that
+      # identity rather than holding a public key; README.md has the command.
+      #
+      # Public is meant literally: the Rekor entry carries the certificate, so
+      # the repository and workflow path become publicly visible even while
+      # the repository is private.
       #
       # Signed once, by digest, rather than once per tag: every tag resolves to
-      # the same manifest, so the old per-tag loop re-signed one digest N times.
-      # The digest now comes from the push step -- `podman inspect` reports what
-      # the local store holds, and the store is not what the registry sees.
+      # the same manifest. The digest comes from the push step -- `podman
+      # inspect` reports what the local store holds, and the store is not what
+      # the registry sees.
       - name: Sign the published image
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' && steps.push.outputs.digest != ''
+        shell: bash --noprofile --norc -euo pipefail {0}
         env:
-          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
-          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           IMAGE: ${{ steps.push.outputs.image }}
           DIGEST: ${{ steps.push.outputs.digest }}
           # Empty when the sealed variant was skipped or not pushed; the same
           # image repository either way, so IMAGE serves both.
           DIGEST_SEALED: ${{ steps.push_sealed.outputs.digest }}
         run: |
-          set -euo pipefail
-          if [ -z "${COSIGN_PRIVATE_KEY}" ]; then
-            echo "COSIGN_PRIVATE_KEY not set -- skipping signing."
-            exit 0
-          fi
-          if ! command -v cosign >/dev/null 2>&1; then
-            echo "cosign not installed on the runner host -- skipping signing."
-            exit 0
-          fi
-          cosign sign --yes --key env://COSIGN_PRIVATE_KEY "${IMAGE}@${DIGEST}"
+          printf '%s' "${REGISTRY_TOKEN}" \
+            | cosign login "${REGISTRY}" --username "${{ github.actor }}" --password-stdin
+          cosign sign --yes "${IMAGE}@${DIGEST}"
           if [ -n "${DIGEST_SEALED}" ]; then
-            cosign sign --yes --key env://COSIGN_PRIVATE_KEY "${IMAGE}@${DIGEST_SEALED}"
+            cosign sign --yes "${IMAGE}@${DIGEST_SEALED}"
           fi
 
-      # The ephemeral server lives ~5 more minutes and may take the next job;
-      # keep its disk clean but leave tagged layers as cache for a queued
-      # follow-up build.
       # Last, so that everything the sealed variant does not affect has already
       # happened: the main tags are pushed and signed, and only then does the
       # job go red over an image it declined to publish.
@@ -432,10 +399,3 @@ jobs:
           echo "sealed against a different tree than the image itself. See the" >&2
           echo "dumpfile diff in the verification step above." >&2
           exit 1
-
-      - name: Clean up
-        if: always()
-        run: |
-          rm -rf src || true
-          podman image prune -f || true
-          df -h / | tail -1

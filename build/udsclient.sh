@@ -9,18 +9,16 @@
 # package, an RPM, two AppImage tarballs and this `.deb`, and the `.deb` is the
 # only one of the six that is an actual package for this system.
 #
-# It is the sixth thing here that is not from the Debian archive, and the third
-# bare `.deb` after Discord and pandoc. Where it comes from is different from
-# both: upstream publishes no apt repository and no release artefacts at all --
+# It is the fifth thing here that is not from the Debian archive, and the
+# second bare `.deb` after pandoc. Where it comes from is different from
+# pandoc's: upstream publishes no apt repository and no release artefacts at all --
 # the GitHub release for 4.0 has no assets -- because the client is shipped by
 # the broker that it talks to, from /uds/res/clients/ on the broker's own host.
 # So the download is from uds.mondragon.edu, and what authenticates it is TLS to
 # that host plus the pin below.
 #
-# The pin is pandoc's shape rather than Discord's. Discord's `.deb` is a
-# downloader for a program that updates itself under $HOME, so pinning it
-# would pin the wrong thing; this `.deb` is the program, so the version and the
-# file's SHA-256 are both constants and the build fails if the bytes differ.
+# The pin is pandoc's shape: the version and the file's SHA-256 are both
+# constants and the build fails if the bytes differ.
 # Nobody signs the file or a checksum list, so like pandoc's hash and
 # tailscale.sh's fingerprint the value below is a record of what the build
 # first saw rather than a second opinion. It still buys the thing the pins are

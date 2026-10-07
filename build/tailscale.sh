@@ -32,15 +32,13 @@
 # 404s on the key fetch and stops the build, which is the right way for that to
 # fail.
 #
-# Architectures is pinned as it is on the other two vendor repos, for a
-# different reason. Those two publish no i386 indices at all, so the line is
-# what keeps the multiarch Steam enabled from breaking `apt-get update`;
-# pkgs.tailscale.com does publish i386, so here it only avoids fetching a
-# ~90 KiB index for an architecture nothing in this image would install
-# tailscale on.
+# Architectures is pinned as it is on the other two vendor repos. The image
+# has no foreign architecture enabled, so today the line changes nothing; it
+# is there so that enabling one later does not have apt asking these repos for
+# indices -- pkgs.tailscale.com does publish i386, the other two publish none.
 #
-# Nothing needs correcting for image mode, which makes this the second vendor
-# package after Discord that ships as it is. The .deb is two Go binaries in
+# Nothing needs correcting for image mode, which makes this the one vendor
+# package here that ships as it is. The .deb is two Go binaries in
 # /usr (about 74 MiB together), three units in /usr/lib/systemd/system and one
 # conffile in /etc/default -- nothing in /opt to fold into /usr/lib/opt, and
 # nothing under /var for bootc-rootfs.sh to transcribe. tailscaled's state

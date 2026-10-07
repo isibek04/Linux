@@ -11,12 +11,11 @@
 # from source, and the second assembles the bootable root by hand before
 # installing the desktop on it.
 #
-# Almost everything installed comes from the Debian archive. Six things do
+# Almost everything installed comes from the Debian archive. Five things do
 # not: three vendor apt repositories -- Anthropic's, for the Claude desktop
 # app, Google's, for Chrome, and Tailscale's, for the node agent -- each with
 # its signing key pinned to a fingerprint the build refuses to proceed without,
-# and three bare `.deb`s: Discord, which publishes no repository at all and so
-# has no key to pin; pandoc, whose GitHub release is pinned by version and
+# and two bare `.deb`s: pandoc, whose GitHub release is pinned by version and
 # SHA-256 instead because trixie's is two years old and there is no backport;
 # and the UDS client, pinned the same way, from the university's VDI broker
 # because that is the only place it is published.
@@ -243,6 +242,11 @@ RUN apt-get install -y \
 # passt and slirp4netns for rootless networking, aardvark-dns, catatonit,
 # fuse-overlayfs, containers-storage.
 #
+# distrobox is in trixie main and runs on that same rootless podman. It is the
+# answer to a read-only /usr: a mutable container of any distro, sharing $HOME,
+# for the things that would otherwise be an `apt-get install` on the host. It
+# writes nothing outside the user's home, so it needs no image-mode correction.
+#
 # gh and glab are both in trixie main, so they need no third-party repo. The
 # Gitea CLI still does: Debian's `tea` package is an unrelated text editor.
 #
@@ -261,7 +265,7 @@ RUN apt-get install -y \
 # recreates it by hand; without it accton fails with ENOENT on every host
 # because Linux's acct(2) does not create its target file, only opens it.
 RUN apt-get install -y \
-      bash-completion btop curl direnv git gnupg jq less man-db neovim \
+      bash-completion btop curl direnv distrobox git gnupg jq less man-db neovim \
       nodejs npm podman python3 rsync skopeo uidmap unzip wget zip \
       acct openssh-server pkexec power-profiles-daemon \
       gh glab libreoffice texlive-full bat parallel \
@@ -270,8 +274,7 @@ RUN apt-get install -y \
 
 # Pandoc from the `.deb` on its GitHub release rather than the archive: trixie
 # has 3.1.11.1 and no backport, and upstream publishes no apt repository, so
-# this is the second bare package here after Discord -- but unlike Discord it is
-# the program itself and not a downloader, so build/pandoc.sh pins the version
+# this is the first bare package here, and build/pandoc.sh pins the version
 # and the file's SHA-256 and fails on a mismatch. Bumping it is a commit. Wants
 # curl from the step above; one static binary under /usr/bin, nothing in /opt
 # or /var, no maintainer scripts. Same constraint as every package step: ahead
@@ -280,7 +283,7 @@ RUN /tmp/build/pandoc.sh
 
 # The UDS client -- the OpenUDS VDI client the university's broker hands out --
 # from the `.deb` that broker serves, because upstream publishes it nowhere
-# else. Third bare package here, pinned pandoc's way: build/udsclient.sh holds
+# else. Second bare package here, pinned pandoc's way: build/udsclient.sh holds
 # the version and the file's SHA-256 and fails on a mismatch, which is also how
 # a broker upgrade announces itself. Wants curl from the step above; a hundred
 # KiB of Python under /usr/lib/UDSClient and a .desktop file that registers the
@@ -315,8 +318,7 @@ RUN /tmp/build/google-chrome.sh
 
 # Tailscale's apt repository and the node agent from it, on the terms the first
 # two vendor repos set: a key fetched, its fingerprint checked, this image's own
-# deb822 entry. Like Discord and unlike the other two, it needs no image-mode
-# correction: two binaries in /usr, three units, one conffile, nothing in /opt
+# deb822 entry. Unlike the other two, it needs no image-mode correction: two binaries in /usr, three units, one conffile, nothing in /opt
 # and nothing under /var, so this step is the whole of it.
 #
 # Where it diverges from upstream's scripts/installer.sh, apart from the pin, is

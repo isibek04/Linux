@@ -1,0 +1,104 @@
+name: Cleanup Old Package Versions
+
+on:
+  schedule:
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'List what would be deleted without deleting it'
+        type: boolean
+        default: false
+
+concurrency:
+  group: cleanup-packages
+  cancel-in-progress: false
+
+permissions:
+  # Deleting versions of a package this repository published. GITHUB_TOKEN
+  # gets admin on a package the first time a workflow here pushes it.
+  packages: write
+
+env:
+  OWNER: ${{ github.repository_owner }}
+  # publish.yml pushes to ghcr.io/<owner>/os4.
+  PACKAGE_NAME: os4
+  MIN_VERSIONS_TO_KEEP: '10'
+  MAX_AGE_DAYS: '30'
+  DRY_RUN: ${{ inputs.dry_run || 'false' }}
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-24.04
+
+    steps:
+      # On ghcr.io a package version is a manifest digest carrying a list of
+      # tags, not a tag -- so the unit pruned here is a digest, and a digest
+      # survives if any one of its tags is protected. Each push to main
+      # leaves the previous main digest untagged; those are what this mostly
+      # collects.
+      #
+      # cosign stores each signature as its own version, tagged
+      # `sha256-<digest of the signed image>.sig`. Those are not counted as
+      # images: one is deleted exactly when the image it signs is gone, and
+      # kept otherwise, whatever its age.
+      - name: Delete old container versions
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          case "$(gh api "users/${OWNER}" --jq .type)" in
+            Organization) base="orgs/${OWNER}" ;;
+            *)            base="users/${OWNER}" ;;
+          esac
+          path="${base}/packages/container/${PACKAGE_NAME}/versions"
+
+          all="$(gh api --paginate "${path}?per_page=100" | jq -s 'add // []')"
+          echo "Found $(echo "$all" | jq length) version(s) of ${PACKAGE_NAME}."
+
+          cutoff="$(date -u -d "${MAX_AGE_DAYS} days ago" +%s)"
+
+          # Tags that must never be pruned, each with or without -sealed.
+          protected='^(latest|main|v?[0-9]+(\.[0-9]+){0,2})(-sealed)?$'
+          sigtag='^sha256-[0-9a-f]{64}(\.[a-z]+)?$'
+
+          plan="$(echo "$all" | jq -c \
+            --argjson keep "${MIN_VERSIONS_TO_KEEP}" \
+            --argjson cutoff "${cutoff}" \
+            --arg protected "$protected" \
+            --arg sigtag "$sigtag" '
+            def tags: .metadata.container.tags;
+            def is_sig: (tags | length > 0) and all(tags[]; test($sigtag));
+
+            ([.[] | select(is_sig | not)] | sort_by(.created_at) | reverse) as $images
+            | ($images
+               | to_entries
+               | map(select(
+                   .key >= $keep
+                   and (.value.created_at | fromdateiso8601) < $cutoff
+                   and (any(.value | tags[]; test($protected)) | not)))
+               | map(.value)) as $doomed
+            | ([$images[].name] - [$doomed[].name]) as $kept
+            | $doomed
+              + [.[] | select(is_sig)
+                     | select((tags[0] | capture("^sha256-(?<d>[0-9a-f]{64})") | .d
+                               | "sha256:" + .) as $subject
+                              | $kept | index($subject) | not)]
+            | .[] | {id, name, tags: (tags | join(","))}')"
+
+          if [ -z "$plan" ]; then
+            echo "Nothing to prune."
+            exit 0
+          fi
+
+          echo "$plan" | while read -r v; do
+            id="$(echo "$v" | jq -r .id)"
+            label="$(echo "$v" | jq -r '"\(.name) [\(.tags)]"')"
+            if [ "${DRY_RUN}" = "true" ]; then
+              echo "Would delete ${PACKAGE_NAME}@${label}"
+              continue
+            fi
+            echo "Deleting ${PACKAGE_NAME}@${label}"
+            gh api -X DELETE "${base}/packages/container/${PACKAGE_NAME}/versions/${id}" --silent
+          done

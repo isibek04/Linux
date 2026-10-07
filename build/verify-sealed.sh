@@ -29,8 +29,8 @@ set -euo pipefail
 image="${1:-}"
 [ -n "${image}" ] || { echo "usage: $0 <image-ref>" >&2; exit 2; }
 
-# podman reads containers.conf out of the home directory, and forgejo-runner
-# starts the job with HOME unset.
+# podman reads containers.conf out of the home directory, and a CI runner may
+# start the job with HOME unset.
 export HOME="${HOME:-$(getent passwd "$(id -u)" | cut -d: -f6)}"
 
 scratch="$(mktemp -d "${TMPDIR:-/var/tmp}/os4-verify-XXXXXX")"

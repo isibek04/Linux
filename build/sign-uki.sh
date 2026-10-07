@@ -35,8 +35,8 @@ fi
   exit 2
 }
 
-# podman reads containers.conf out of the home directory, and forgejo-runner
-# starts the job with HOME unset.
+# podman reads containers.conf out of the home directory, and a CI runner may
+# start the job with HOME unset.
 export HOME="${HOME:-$(getent passwd "$(id -u)" | cut -d: -f6)}"
 
 # Not mktemp's default /tmp: the digest is computed into a throwaway composefs

@@ -6,13 +6,12 @@
 # forky's glibc, so pinning it the way ostree-forky.sh pins libostree would
 # pull a second libc into the image. Upstream publishes no apt repository
 # either -- only per-release `.deb`s on github.com/jgm/pandoc/releases -- so
-# this is the fifth thing here that is not from the archive, and the second
-# after Discord that comes as a bare package rather than from a repo.
+# this is the fourth thing here that is not from the archive, and the first
+# that comes as a bare package rather than from a repo.
 #
-# What it is not is a second Discord. That script cannot pin anything because
-# its `.deb` is a downloader for a program that updates itself; this one is the
-# program, so it pins both the version and the SHA-256 of the file, and the
-# build fails if the bytes differ. Upstream signs neither the `.deb` nor a
+# With no repo there is no repo key, so what this pins instead is both the
+# version and the SHA-256 of the file, and the build fails if the bytes
+# differ. Upstream signs neither the `.deb` nor a
 # checksum list, so there is no key to check the way claude-desktop.sh does --
 # the hash below was taken from the file GitHub served when the pin was set,
 # and like tailscale.sh's fingerprint it is a record of what the build first
@@ -31,8 +30,8 @@
 # which only matters if Debian's own pandoc had been installed first; it is
 # not, and nothing in this image recommends it.
 #
-# amd64 only. The image is: linux-image-amd64, qemu-system-x86 and the i386
-# multiarch for Steam all say so, and the two vendor repos' `Architectures:
+# amd64 only. The image is: linux-image-amd64 and qemu-system-x86 both say
+# so, and the vendor repos' `Architectures:
 # amd64 arm64` lines are about which indices apt fetches, not about a second
 # build. Upstream does publish an arm64 `.deb`; adding it is a second hash and
 # a case statement, when there is a build to want it.
@@ -54,7 +53,7 @@ deb="$(mktemp --suffix=.deb)"
 trap 'rm -f "${deb}"' EXIT
 
 # github.com 302s to release-assets.githubusercontent.com with a short-lived
-# signed URL; -L follows it. No host check as in discord.sh: with the hash
+# signed URL; -L follows it. No check on which host it lands on: with the hash
 # pinned, where the bytes came from is not what authenticates them.
 curl --proto '=https' --tlsv1.2 -fsSL -o "${deb}" "${url}"
 

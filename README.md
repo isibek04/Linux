@@ -4,13 +4,13 @@ A Debian 13 (trixie) workstation, built and shipped as a bootable container.
 The Debian counterpart to [os3](https://git.sebz.me/sebastian/os3), which does
 the same thing on Fedora.
 
-Same shape as os3 — a desktop on a `bootc` image, published to `git.sebz.me` by
-Forgejo Actions, updates staged in the background rather than applied on a
-reboot you did not ask for — with one deliberate difference: the desktop is KDE
-Plasma 6, where os3 runs LXQt.
+Same shape as os3 — a desktop on a `bootc` image, published to `ghcr.io` by
+GitHub Actions and signed keylessly with cosign, updates staged in the
+background rather than applied on a reboot you did not ask for — with one
+deliberate difference: the desktop is KDE Plasma 6, where os3 runs LXQt.
 
 ```
-bootc switch git.sebz.me/sebastian/os4:main
+bootc switch ghcr.io/isibek04/os4:main
 ```
 
 ## Why this repo is longer than os3's
@@ -288,13 +288,12 @@ desktops, and `power-profiles-daemon` is what powerdevil talks to.
 
 ## What os3 has that this does not
 
-Almost everything installed here comes from the Debian archive. There are six
+Almost everything installed here comes from the Debian archive. There are five
 exceptions. Three are vendor apt repositories with a pinned signing key —
 Anthropic's, for the Claude desktop app, Google's, for Chrome, and Tailscale's,
-for the node agent — and three are bare `.deb`s: Discord, which publishes no
-repository; pandoc, which is in the archive but two years behind upstream and
-has no backport — see [Pandoc, and a `.deb` worth
-pinning](#pandoc-and-a-deb-worth-pinning); and the UDS client, which is
+for the node agent — and two are bare `.deb`s: pandoc, which is in the archive
+but two years behind upstream and has no backport — see [Pandoc, and a `.deb`
+worth pinning](#pandoc-and-a-deb-worth-pinning); and the UDS client, which is
 published only by the VDI broker it connects to — see [The UDS client, and a
 `.deb` only its server publishes](#the-uds-client-and-a-deb-only-its-server-publishes).
 These are the os3 packages that have no Debian equivalent, left out of this
@@ -303,7 +302,8 @@ first cut:
 | os3 | Why not here |
 | --- | --- |
 | rpmfusion codecs | No Debian equivalent for the DVD/BluRay side; `deb-multimedia` is the third-party option. Note that trixie's own `ffmpeg` already links `libx264` and `libx265`, so H.264/H.265 playback is not the gap this row once implied. |
-| `gamescope` | Not packaged for Debian at all. `mangohud` is installed, and so is `steam` — see below. |
+| `gamescope` | Not packaged for Debian at all. `mangohud` is installed. |
+| `steam`, `discord` | Were installed here once and have been taken out. |
 | `tea` | Gitea's CLI is a release binary. Debian ships a `tea` package, but it is an unrelated text editor, so the name is not usable. |
 | `uv` | Astral release binary. |
 | `nix` | Debian has `nix-bin` and `nix-setup-systemd`; skipped along with the `ostree-state-overlay@nix` unit that goes with it — which would also mean installing `ostree-boot`, since that is where the unit template lives and this image does not currently pull it in. |
@@ -312,8 +312,8 @@ first cut:
 
 Each is additive — a repo, a keyring and a package name — so they can come back
 one at a time. `gh` and `glab` used to be on this list and are not any more:
-both are in trixie `main` and are installed. `google-chrome-stable`, `steam`,
-`discord` and `tailscale` have come off it too; see below.
+both are in trixie `main` and are installed. `google-chrome-stable` and
+`tailscale` have come off it too; see below.
 
 `claude-desktop` was the first row actually done the additive way, in
 `build/claude-desktop.sh`, and `google-chrome.sh` and `tailscale.sh` follow it:
@@ -434,156 +434,17 @@ yet, the way out is from a text console:
 `mv ~/.cache/fontconfig ~/.cache/fontconfig.bad && loginctl unlock-sessions`,
 then `systemctl --user restart plasma-plasmashell`.
 
-### Steam, and why not Valve's own `.deb`
+### The third-party installs, side by side
 
-`steam-installer` is in trixie `contrib`, which `apt-sources.sh` already
-enables; `steam-libs`, `steam-libs-i386` and `steam-devices` are in `main`.
-Nothing about Steam needs `non-free`, so the component list is unchanged.
-
-The `.deb` from `repo.steampowered.com` is the obvious alternative, and it is
-*not* the one that avoids multiarch — that was the first thing checked.
-Valve's `steam-launcher` recommends `steam-libs-i386` exactly as Debian's
-package depends on it, because the Steam client is a 32-bit program either
-way. Both
-packages are also wrappers around the same thing: Debian's `/usr/games/steam`
-downloads Valve's own `steam_<version>.tar.gz`, checks it against a SHA-256 in
-the script, and unpacks `bootstraplinux_ubuntu12_32.tar.xz` into
-`~/.steam/debian-installation`; Valve's ships that same tarball inside the
-`.deb`. After first run the client updates itself from Valve's CDN in `$HOME` in
-both cases, so the packaged version — 1.0.0.83 in trixie against 1.0.0.87
-upstream — is the version of the bootstrap, not of the Steam you end up
-running.
-
-What differs is the packaging, and all three differences point the same way for
-an image-mode system:
-
-| | `steam-installer` (trixie) | `steam-launcher` (Valve) |
-| --- | --- | --- |
-| Repository | The archive. No third-party repo, no third key to pin. | Ships `/etc/apt/sources.list.d/steam-stable.list` and `steam-beta.list` as **conffiles**, plus its own keyring. There is no `repo_add_once`-style opt-out to set the way `google-chrome.sh` does; they would have to be deleted after the install. |
-| Maintainer scripts | A `preinst` that shows one debconf note about `nvidia-driver-libs:i386`, and a `postrm`. No `postinst` at all, and nothing written to `/var`. | `preinst`/`postinst`/`prerm`/`postrm`. |
-| Runtime dependency fixing | None. | `/usr/lib/steam/bin_steamdeps.py`, reached through `Depends: apt, python3-apt, pkexec`, which offers to `apt-get install` missing dependencies when the client starts. On a host with a read-only `/usr` that can only ever fail. |
-
-Valve's package also `Conflicts: steam-devices` while `Provides:`-ing it, so
-the two routes are mutually exclusive rather than complementary: you take one
-set of udev rules or the other.
-
-So: `steam-installer` and `steam-devices` from the archive, and one
-`dpkg --add-architecture i386` before them. The architecture is recorded in
-`/var/lib/dpkg/arch`, which `bootc-rootfs.sh` moves into `/usr` along with the
-rest of the dpkg database, so a deployed host — and any image built on top of
-this one — still knows i386 is enabled.
-
-Adding the architecture makes apt fetch a second set of indices for every source
-that does not restrict itself. The Debian entries and the forky pin all publish
-i386, so that is fine; the two vendor repositories already pin
-`Architectures: amd64 arm64`, which is why enabling i386 does not send apt
-looking for indices `dl.google.com` and `downloads.claude.ai` do not have.
-
-The cost is about **494 MiB** of i386 packages: `libllvm19:i386` (143 MiB),
-`mesa-vulkan-drivers:i386` (83 MiB) and `mesa-libgallium:i386` (44 MiB) are most
-of it — a second, 32-bit copy of the GPU stack. Much of that arrives through
-recommends, which are on here as everywhere: `mesa-vulkan-drivers:i386`,
-`va-driver-all:i386` and `libsdl2-2.0-0:i386` are all recommends of
-`steam-libs` rather than depends, and without them the client comes up with no
-32-bit Vulkan and no hardware video decode. One recommend that resolves to
-nothing new: `steam-libs` wants `xterm | x-terminal-emulator`, and with a
-provider already installed — `konsole`, from `kde-standard` — apt pulls no
-second terminal in.
-
-Three things this does not do. Steam's own `README.Debian` suggests running it
-as a separate unprivileged user, since games are not sandboxed and can read
-everything the account can — that is a per-host decision, not an image one. It
-ships `examples/50-steam-no-admin-actions.rules`, a polkit rule that silences
-the NetworkManager prompts Steam's SteamOS-derived code raises; it names a
-username, so it stays an example here rather than being installed. And it
-installs no Nvidia libraries: this image is mesa-only, and the `preinst`
-asks for `nvidia-driver-libs:i386` only when it sees `/sys/module/nvidia` —
-which, during a container build, is the *build host's* `/sys`, and which the
-noninteractive frontend skips in any case. Layering the Nvidia stack on top is
-at least possible now that i386 is enabled; it is not attempted here.
-
-### Discord, and a `.deb` with nothing behind it
-
-Discord is the third third-party install, and the one that does not fit the
-pattern the other two established. There is no repository: what Discord
-publishes is a download endpoint,
-`https://discord.com/api/download?platform=linux&format=deb`, which 302s to the
-current release on `stable.dl2.discordapp.net`. So there is no signing key, and
-therefore no fingerprint to pin — the check `claude-desktop.sh` and
-`google-chrome.sh` both perform, and the one this README called the part worth
-copying, has no counterpart in `build/discord.sh`.
-
-What authenticates the download is TLS to `discord.com` and to the host the
-redirect names, and nothing else. That is worth stating rather than dressing
-up. The two assertions the script does make are sanity checks and not a
-substitute for a signature:
-
-- **The redirect has to land on Discord's own hosts.** `curl -L` follows
-  redirects across hosts, so an endpoint that one day points elsewhere would
-  have this image install a stranger's package as root without a word.
-  `-w '%{url_effective}'` reports where the chain actually ended, and anything
-  outside `discord.com` and `discordapp.net` fails the build.
-- **What came back has to be the package it claims to be** — `dpkg-deb -f`
-  reports `Package: discord`, or the build stops. This catches an error page
-  served with a 200 on it as much as anything else.
-
-#### The `.deb` does not contain Discord
-
-It is 2 MiB, and that is not a compression story. What the package ships is
-`/usr/bin/discord`, a 44-line shell script, and a 4 MiB
-`/usr/share/discord/updater_bootstrap`. On first launch the script looks for
-`~/.config/discord/Discord`, does not find it, and runs the bootstrap, which
-downloads the actual application from `updates.discord.com` into
-`~/.config/discord/app-<version>/` and execs it. Thereafter Discord updates
-itself in the same place.
-
-That is the same arrangement as Debian's `steam-installer`, described above:
-the packaged version is the version of the bootstrap, not of the program you
-end up running. It is also why the script pins neither a version nor a
-checksum. Doing so would break every scheduled build the moment Discord cut a
-release, in exchange for pinning a downloader that does not pin what it
-downloads.
-
-The consequence is worth being explicit about, because it differs from every
-other package in this image: **Discord does not arrive with `bootc upgrade`,
-and it is not in the image at all.** It arrives on first launch, per user,
-into `~/.config/discord` — which is under `/var/home`, so it is host state
-that survives image updates and is invisible to them.
-
-#### Which makes it the easiest vendor package here to ship read-only
-
-The six third-party installs, on what image mode actually asks of them:
+What image mode actually asks of each of the five:
 
 | | Trust anchor | Lands in `/opt` | Self-update target |
 | --- | --- | --- | --- |
 | `claude-desktop` | Anthropic's key, fingerprint pinned | No — `/usr/lib` | apt, so the image |
 | `google-chrome-stable` | Google's key, fingerprint pinned | 431 MiB, folded into `/usr/lib/opt`; AppArmor profile re-pointed, daily cron symlink removed | apt, so the image — but `/etc/cron.daily/google-chrome` would write to a read-only `/usr/share/keyrings` |
-| `discord` | TLS to `discord.com` | No | `$HOME`, which is writable |
 | `tailscale` | Tailscale's key, fingerprint recorded — but not one Tailscale publishes | No — `/usr/bin`, `/usr/sbin` | apt, so the image — unless `--auto-update` is switched on, which shells out to `apt-get` and cannot work here |
 | `pandoc` | SHA-256 of the release `.deb`, pinned with its version | No — `/usr/bin` | None; the image |
 | `udsclient3` | SHA-256 of the broker's `.deb`, pinned with its version | No — `/usr/lib/UDSClient` | None; the image |
-
-Nothing of Discord's goes to `/opt`, so there is no tree for `bootc-rootfs.sh`
-to fold and no path to re-point. Nothing writes to `/usr` after the install
-either — the self-updater's target is under `$HOME`, where Chrome's cron script
-and Valve's `bin_steamdeps.py` would both be reaching for a `/usr` that is not
-writable. It needs no image-mode correction at all — of the other three only
-`tailscale` manages that, and for the opposite reason: it writes nowhere after
-the install rather than writing somewhere writable.
-
-Two smaller things, neither of them a correction. Its AppArmor profile attaches
-to `@{HOME}/.config/discord/app-*/Discord`, which resolves to a path nothing on
-this image has unless `apparmor-home.sh` has extended `@{HOMEDIRS}` to cover
-`/var/home` — the same tunable `akonadi-server` needed, and the reason
-`discord.sh` runs before that step rather than after it. Like Chrome's, the
-profile is `flags=(unconfined)`
-and grants `userns`, so it is inert on Debian either way. And the `postinst`
-opens with `systemctl reload apparmor`, which in a build container with no
-running systemd prints `System has not been booted with systemd` and returns 1.
-The script is `/bin/sh` without `set -e` and ends on an `rm -f`, so dpkg sees
-exit 0 and the install succeeds; the profile is a conffile under
-`/etc/apparmor.d` and `apparmor.service` loads it at boot regardless. The line
-in the build log is noise, not a failure.
 
 ### Tailscale, and a daemon that ships disabled
 
@@ -621,10 +482,9 @@ The repository is keyed by Debian codename rather than a `stable` suite, so the
 suite follows `apt-sources.sh`'s `DEBIAN_SUITE`. A codename Tailscale does not
 publish 404s on the key fetch and stops the build, which is the right way for
 that to fail. `Architectures: amd64 arm64` is set as it is on the other two
-vendor entries, for a different reason: those two publish no i386 indices at
-all, so the line is what keeps the multiarch Steam enabled from breaking
-`apt-get update`, while `pkgs.tailscale.com` does publish i386 and the line only
-avoids fetching a ~90 KiB index nothing here would install from.
+vendor entries. No foreign architecture is enabled in this image, so today the
+line changes nothing; it is there so that enabling one later does not send apt
+asking for indices — `pkgs.tailscale.com` publishes i386, the other two do not.
 
 #### The keyring goes under a name of this image's own
 
@@ -691,13 +551,11 @@ all, and forky's 3.10.2 is built against forky's glibc, so pinning it the way
 `ostree-forky.sh` pins libostree would pull a second libc into the image for one
 program. Upstream publishes no apt repository either — only a `.deb` per release
 on `github.com/jgm/pandoc/releases`. So `build/pandoc.sh` installs that, and
-pandoc is the fifth thing here from outside the archive and the second bare
-package after Discord.
+pandoc is the fourth thing here from outside the archive and the first bare
+package.
 
-It is the mirror image of Discord's, though. That script pins nothing because
-its `.deb` is a downloader for a program that updates itself under `$HOME`;
-pinning it would pin the wrong thing. Pandoc's `.deb` *is* the program, so the
-script pins both — the version in the URL and the SHA-256 of the file — and
+With no repository there is no repository key, so the script pins the file
+itself — the version in the URL and the SHA-256 of the `.deb` — and
 refuses to install anything else. Upstream signs neither the package nor a
 checksum list, so there is no key to fingerprint the way the three repos are;
 the hash was read off the file GitHub served when the pin was set, which puts it
@@ -717,8 +575,8 @@ carries `Replaces: pandoc-data`, which only matters if Debian's own `pandoc`
 were installed first, and it is not: it comes off the archive list in the same
 step, and none of the trixie packages that recommend it are in this image.
 
-The pin is amd64 only. The image is too — `linux-image-amd64`, `qemu-system-x86`
-and the i386 multiarch for Steam all say so; the vendor repos' `Architectures:
+The pin is amd64 only. The image is too — `linux-image-amd64` and
+`qemu-system-x86` both say so; the vendor repos' `Architectures:
 amd64 arm64` lines are about which indices apt fetches, not about a second
 build. Upstream does publish an arm64 `.deb`, and adding it is a second hash and
 a `case` statement, when there is a build to want it.
@@ -733,10 +591,10 @@ repository, and the GitHub release for 4.0 has no assets — because the client
 ships with the broker, which serves it from `/uds/res/clients/` on its own host
 alongside a Windows installer, a Mac package, an RPM and two AppImage tarballs.
 So `build/udsclient.sh` fetches `udsclient3_4.0.0_all.deb` from
-`uds.mondragon.edu`, and the client is the sixth thing here from outside the
-archive and the third bare package after Discord and pandoc.
+`uds.mondragon.edu`, and the client is the fifth thing here from outside the
+archive and the second bare package after pandoc.
 
-The pin is pandoc's. The `.deb` is the program rather than a downloader for
+The pin is pandoc's. The `.deb` is the program, not a downloader for
 one, so the script holds its version and its SHA-256 and refuses anything else;
 nobody signs the file or a checksum list, so the hash is once more a record of
 what the build first saw, and the trust anchor is TLS to the broker plus that
@@ -749,7 +607,7 @@ than for pandoc: a UDS broker checks the client's version and can refuse one
 that is too old, so a client that kept installing unpinned would be one that
 stopped working without a word.
 
-The package itself is the smallest of the six by a wide margin and asks nothing
+The package itself is the smallest of the five by a wide margin and asks nothing
 of image mode. 106 KiB, `Architecture: all`, no maintainer scripts: twenty-odd
 Python files under `/usr/lib/UDSClient`, a `.desktop` file and a doc directory.
 Its Depends are all in trixie `main` — `python3-pyqt6`, `freerdp3-x11`,
@@ -960,9 +818,33 @@ correct outcome and the point of the exercise.
 
 | Workflow | Trigger | Notes |
 | --- | --- | --- |
-| `publish.yml` | push to `main`, PRs, releases, every other day | Builds on the `hetzner-host` runner with the host's docker, then pushes with `skopeo copy --format oci` — not `docker push`, see [OCI media types are not optional](#oci-media-types-are-not-optional). Signs the pushed digest with cosign when `COSIGN_PRIVATE_KEY` is set. PRs build without pushing. |
+| `publish.yml` | push to `main`, PRs, releases, every other day | Builds with rootful podman on a GitHub-hosted `ubuntu-24.04` runner, with the container store moved to the runner's `/mnt` disk for space, then pushes to `ghcr.io/<owner>/os4` with `skopeo copy --format oci` — not `docker push`, see [OCI media types are not optional](#oci-media-types-are-not-optional). Signs each pushed digest with keyless cosign. PRs build without pushing. |
 | `build-disk.yml` | manual | os3's anaconda-ISO workflow, adapted. Anaconda is Fedora's installer and cannot install a Debian root, so this produces a qcow2 (or raw, or vmdk) disk image instead. Does not currently work — see [Installing to a disk](#installing-to-a-disk). |
-| `cleanup-packages.yml` | daily | Unchanged from os3 apart from the package name. |
+| `cleanup-packages.yml` | daily | Prunes `ghcr.io` versions older than 30 days beyond the newest 10, never touching a digest tagged `latest`, `main` or a version number (or their `-sealed` twins). A cosign signature goes when the image it signs does, and not before. `workflow_dispatch` has a dry-run switch. |
+
+Repository secrets: `SB_LEAF_KEY` (the Secure Boot leaf key; without it the
+sealed variant is skipped and v4l2loopback ships unsigned), and
+`S3_ACCESS_KEY_ID`/`S3_SECRET_ACCESS_KEY` for `build-disk.yml`. Registry access
+and signing need none: both run on the job's own `GITHUB_TOKEN` and OIDC token.
+
+The package is private until made public in its settings on GitHub. Hosts that
+`bootc switch` to it while it is private need credentials in
+`/etc/ostree/auth.json`.
+
+### Verifying a signature
+
+Signing is keyless: there is no public key to distribute. cosign gets a
+short-lived certificate from Sigstore's Fulcio naming the workflow that ran,
+and logs the signature in the public Rekor transparency log — which also makes
+the repository and workflow names public, private repository or not.
+Verifying means checking that identity:
+
+```
+cosign verify \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity-regexp '^https://github\.com/isibek04/Linux/\.github/workflows/publish\.yml@refs/(heads/main|tags/v.+)$' \
+  ghcr.io/isibek04/os4:main
+```
 
 ## Installing to a disk
 
@@ -1017,10 +899,10 @@ For an image already in storage as schema 2, convert it on the way in and the
 image ID becomes the config digest bootc was asking for:
 
 ```
-podman rmi git.sebz.me/sebastian/os4:main
+podman rmi ghcr.io/isibek04/os4:main
 skopeo copy --format oci \
-  docker://git.sebz.me/sebastian/os4:main \
-  containers-storage:git.sebz.me/sebastian/os4:main
+  docker://ghcr.io/isibek04/os4:main \
+  containers-storage:ghcr.io/isibek04/os4:main
 ```
 
 ### bootc install to-disk, with two flags that are not optional
@@ -1032,10 +914,10 @@ truncate -s 40G disk.raw
 podman run --rm --privileged --pid=host \
   --security-opt label=type:unconfined_t \
   -v /dev:/dev -v /var/lib/containers:/var/lib/containers -v .:/work \
-  git.sebz.me/sebastian/os4:main \
+  ghcr.io/isibek04/os4:main \
   bootc install to-disk --via-loopback --wipe --filesystem ext4 \
     --composefs-backend --bootloader systemd \
-    --target-imgref git.sebz.me/sebastian/os4:main /work/disk.raw
+    --target-imgref ghcr.io/isibek04/os4:main /work/disk.raw
 ```
 
 `--composefs-backend` is what makes it work. bootc installs bootloaders through
