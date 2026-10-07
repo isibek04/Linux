@@ -15,6 +15,14 @@
 # the 500 of a default source), and only the ostree binaries are raised
 # above it. A dist-upgrade will therefore not drift onto testing.
 #
+# The source fetches Packages only. By default apt also pulls forky's AppStream
+# catalog (DEP-11) and its icon tarballs into /var/lib/swcatalog, and forky's
+# icons are JPEG XL. Trixie's kimageformats JXL plugin spins forever in
+# QImageReader::jumpToNextImage on them, so any Plasma search that matches a
+# forky-only app (typing "key" finds Keyman and GNOME Keysign) hangs
+# plasmashell and then aborts it. Discover has no use for a catalog of
+# packages pinned to 100 anyway.
+#
 # Written as a script rather than inline in the Containerfile for the same
 # reason as apt-sources.sh: heredocs in RUN need BuildKit.
 set -euo pipefail
@@ -24,6 +32,7 @@ Types: deb
 URIs: http://deb.debian.org/debian
 Suites: forky
 Components: main
+Targets: Packages
 Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
 EOF
 
