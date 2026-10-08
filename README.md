@@ -286,6 +286,25 @@ upstream drops the label.
 `enable-units.sh` needed no change: `sddm.service` is the greeter under both
 desktops, and `power-profiles-daemon` is what powerdevil talks to.
 
+### Mesa comes from trixie-backports
+
+Trixie's Mesa is 25.0, and its NVK — the Vulkan driver that runs on nouveau —
+only starts at Turing. Maxwell, Pascal and Volta were enabled in 25.1, so on
+25.0 a laptop's Maxwell dGPU (a GeForce MX130 here) has no Vulkan device at
+all, and `vulkaninfo` lists the Intel iGPU and llvmpipe. `trixie-backports`
+carries 26.1.
+
+`build/mesa-backports.sh` adds the backports source and raises exactly two
+source packages to 990: `mesa`, and `elfutils`, whose `libelf` the backported
+Mesa needs a newer version of. Pinning by source name moves every binary built
+from each together — all of Mesa's drivers on one version, `libelf` and `libdw`
+on one version — and the rest of backports stays at its default 100, where apt
+never picks it on its own. It runs straight after `apt-sources.sh`, because
+`kde-standard` pulls Mesa in well before the GPU stack names it.
+
+This does not make the dGPU fast. Nouveau cannot raise Maxwell's clocks on its
+own, so the card stays at its boot clocks, which NVK does nothing about.
+
 ## What os3 has that this does not
 
 Almost everything installed here comes from the Debian archive. There are six

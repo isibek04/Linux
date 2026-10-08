@@ -90,7 +90,11 @@ COPY build/ /tmp/build/
 
 # apt-sources.sh writes the trixie sources; ostree-forky.sh layers the forky
 # pin on top so the runtime libostree matches the one bootc was built against.
-RUN /tmp/build/apt-sources.sh && /tmp/build/ostree-forky.sh && apt-get upgrade -y
+# mesa-backports.sh takes Mesa from trixie-backports for NVK on Maxwell; it
+# goes in before anything installs, since kde-standard pulls Mesa in long
+# before the GPU stack below names it.
+RUN /tmp/build/apt-sources.sh && /tmp/build/ostree-forky.sh \
+ && /tmp/build/mesa-backports.sh && apt-get upgrade -y
 
 # Before the kernel: its postinst generates an initramfs with whatever dracut
 # config exists at that moment.
@@ -220,7 +224,8 @@ RUN apt-get install -y \
 
 # Media playback and the GPU stack. Narrower than os3's multimedia group by
 # necessity: Debian has no rpmfusion, and the patent-encumbered decoders os3
-# pulls from there have no home in the archive.
+# pulls from there have no home in the archive. Mesa resolves to
+# trixie-backports through the pin mesa-backports.sh wrote.
 RUN apt-get install -y \
       ffmpeg \
       gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-libav \
