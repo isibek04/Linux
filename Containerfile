@@ -55,6 +55,15 @@ ARG BOOTC_REF="v1.17.1"
 # pin (see ostree-forky.sh): bootc needs libostree >= 2025.3, trixie has
 # 2025.2.
 #
+# libclang-dev and libselinux1-dev are for the `selinux` cargo feature, a
+# default since bootc 1.17.0: the selinux-sys crate generates its bindings
+# with bindgen, which panics with "Unable to find libclang" without it.
+# libostree-dev already pulls libselinux1-dev in; it is named here because
+# bootc now needs it in its own right. Building with the feature off would
+# mean restating every other default feature by hand, and Debian runs with
+# SELinux disabled anyway, which libselinux reports and bootc honours. The
+# runtime library, libselinux1, is in every Debian base system already.
+#
 # --no-install-recommends stays in this stage. Nothing here is shipped -- only
 # /output is copied into stage 2 -- so recommends would buy the image nothing
 # and cost the build time. Stage 2 installs with recommends on throughout.
@@ -62,7 +71,8 @@ COPY build/ostree-forky.sh /tmp/build/
 RUN /tmp/build/ostree-forky.sh \
  && apt-get install -y --no-install-recommends \
       build-essential ca-certificates curl git go-md2man jq \
-      libostree-dev libzstd-dev make ostree pkgconf \
+      libclang-dev libostree-dev libselinux1-dev libzstd-dev make ostree \
+      pkgconf \
  && rm -rf /var/lib/apt/lists/*
 
 ENV CARGO_HOME=/usr/local/cargo \
