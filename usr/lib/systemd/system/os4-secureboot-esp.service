@@ -3,10 +3,14 @@ Description=Put shim in front of systemd-boot on the ESP
 Documentation=file:///usr/libexec/os4-secureboot-esp
 # A deployed bootc host, not this image running as a container. Either marker
 # will do: the ostree backend creates /run/ostree-booted, the composefs backend
-# does not, and its only trace is the composefs= karg in the UKI's cmdline.
-# The `|` makes these two alternatives; the EFI condition below still applies.
+# does not, and its only trace is the digest karg on its cmdline. That karg
+# has two spellings: `composefs=<hex>` for the V2 EROFS format, and
+# `composefs.digest=v1-sha512-12:<hex>` for V1, which is what a bootc 1.17
+# install defaults to. systemd matches the key whole, so each needs its own
+# line. The `|` makes these alternatives; the EFI condition below still applies.
 ConditionPathExists=|/run/ostree-booted
 ConditionKernelCommandLine=|composefs
+ConditionKernelCommandLine=|composefs.digest
 # Nothing to do where there is no ESP to fix. The image installs no BIOS
 # bootloader, so a machine without this is not booting from this disk anyway.
 ConditionPathExists=/sys/firmware/efi
