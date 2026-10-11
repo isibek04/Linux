@@ -58,40 +58,57 @@ trap cleanup EXIT
 #                 boots, so the directory has to come from outside regardless.
 store="$(dirname "$(podman info --format '{{.Store.GraphRoot}}')")"
 
-echo "Computing the composefs digest of ${image}"
-expected="$(podman run --rm --privileged \
-  --volume "${store}:/var/lib/containers" \
-  --volume "${scratch}/repo:/var/tmp" \
-  --volume "${scratch}/out:/verify" \
-  "${image}" \
-  bootc container compute-composefs-digest-from-storage "${image}" \
-    --write-dumpfile-to /verify/installed.dump)"
+# Once per EROFS format, because the UKI carries both (see below) and bootc
+# checks every digest it finds. V1 is the preferred one and the one
+# uki-build.sh wrote its dumpfile for, so it gets the dumpfile here too. The
+# two runs are sequential, so the throwaway repo never needs room for two.
+digest_of() {
+  podman run --rm --privileged \
+    --volume "${store}:/var/lib/containers" \
+    --volume "${scratch}/repo:/var/tmp" \
+    --volume "${scratch}/out:/verify" \
+    "${image}" \
+    bootc container compute-composefs-digest-from-storage "${image}" "$@"
+}
+
+echo "Computing the composefs digests of ${image}"
+expected_v1="$(digest_of --erofs-version v1 --write-dumpfile-to /verify/installed.dump)"
+expected_v2="$(digest_of --erofs-version v2)"
 
 # --------------------------------------------------------------------------
 # What the UKI was sealed against
 # --------------------------------------------------------------------------
 # Read out of the image rather than out of the build log: this is the number
 # the signed UKI carries, extracted from its .cmdline section by
-# build/uki-build.sh. The section is NUL-padded, and the karg is `composefs=`
-# with an optional leading `?` meaning fsverity may be missing.
+# build/uki-build.sh. The section is NUL-padded. Since bootc 1.17 `ukify`
+# writes two kargs: `composefs.digest=v1-sha512-12:<hex>` for the V1 EROFS
+# format it now prefers, and `composefs=<hex>` for V2, kept for older bootc
+# clients. Either may carry a leading `?` meaning fsverity may be missing.
 #
 # `|| true` because pipefail would otherwise abort here with nothing said but
 # the shell's own error, and an image built before /boot/os4 existed is a case
 # worth naming rather than dying on.
 cmdline="$(podman run --rm "${image}" sh -c 'cat /boot/os4/*.cmdline' | tr -d '\0')" || true
-actual="$(printf '%s' "${cmdline}" | tr ' ' '\n' | sed -n 's/^composefs=?\{0,1\}//p')"
+actual_v1="$(printf '%s' "${cmdline}" | tr ' ' '\n' \
+  | sed -n 's/^composefs\.digest=?\{0,1\}v1-sha512-12://p')"
+actual_v2="$(printf '%s' "${cmdline}" | tr ' ' '\n' | sed -n 's/^composefs=?\{0,1\}//p')"
 
-[ -n "${actual}" ] || {
-  echo "verify-sealed: no composefs= karg found in ${image}." >&2
+[ -n "${actual_v1}" ] || {
+  echo "verify-sealed: no composefs.digest= karg found in ${image}." >&2
   echo "The build records it at /boot/os4/<kver>.cmdline; an image built before" >&2
-  echo "that existed cannot be verified, only rebuilt. Read: '${cmdline}'" >&2
+  echo "that existed, or with a bootc older than 1.17, cannot be verified, only" >&2
+  echo "rebuilt. Read: '${cmdline}'" >&2
   exit 1
 }
 
-echo "UKI sealed against: ${actual}"
-echo "Image hashes to:    ${expected}"
+echo "UKI sealed against: v1 ${actual_v1}"
+echo "                    v2 ${actual_v2:-(none)}"
+echo "Image hashes to:    v1 ${expected_v1}"
+echo "                    v2 ${expected_v2}"
 
-if [ "${actual}" = "${expected}" ]; then
+# A missing V2 karg is fine -- bootc only checks the digests that are there.
+if [ "${actual_v1}" = "${expected_v1}" ] \
+   && { [ -z "${actual_v2}" ] || [ "${actual_v2}" = "${expected_v2}" ]; }; then
   echo "verify-sealed: ${image} is installable."
   exit 0
 fi

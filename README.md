@@ -1007,7 +1007,7 @@ bootupd, which Debian does not package and this image therefore does not carry.
 With the ostree backend that leaves nothing it will accept — `Bootloader::Grub`
 is the only arm that installs anything, and systemd-boot falls through to a
 hard `bootupd is required for ostree-based installs`
-(`crates/lib/src/install.rs`, bootc 1.16.9). systemd-boot is implemented only
+(`crates/lib/src/install.rs`, bootc 1.17.1). systemd-boot is implemented only
 under the composefs backend. The image already asks for composefs in
 `prepare-root.conf` and bootc formats the root with `-O verity` for it, so this
 is the layout it was built for, not a workaround.
@@ -1029,7 +1029,7 @@ block-device path: `install_to_disk` calls `baseline::install_create_rootfs`,
 which is where LUKS is set up, and only branches on the backend afterwards in
 `install_to_filesystem_impl`. The kargs that baseline generates reach the boot
 entry, because `setup_composefs_bls_boot` extends its cmdline with
-`root_setup.kargs` (`crates/lib/src/bootc_composefs/boot.rs`, bootc 1.16.9).
+`root_setup.kargs` (`crates/lib/src/bootc_composefs/boot.rs`, bootc 1.17.1).
 `-O verity` is still applied to the ext4 root, on the `/dev/mapper` device
 rather than the partition, so the `verity=require` this image asks for in
 `prepare-root.conf` holds over dm-crypt.
@@ -1117,7 +1117,7 @@ bootloader, and why the README used to claim Debian shipped none.
 Nothing else was needed to make bootc use it: `bootctl install` skips a `.efi`
 when a `.efi.signed` sits beside it and drops the suffix at the destination
 (systemd 257, `src/bootctl/bootctl-install.c`), and bootc calls plain
-`bootctl install` (`crates/lib/src/bootloader.rs`, bootc 1.16.9).
+`bootctl install` (`crates/lib/src/bootloader.rs`, bootc 1.17.1).
 
 ### The part bootc does not do
 
@@ -1175,8 +1175,10 @@ second boot.
 
 It covers the bootloader and the kernel. It does not cover the initramfs, and
 more to the point it does not cover the kernel command line — which is where
-bootc puts `composefs=<digest>`, the verity digest the whole read-only `/usr`
-hangs from (`cmdline_options.extend`, `crates/lib/src/bootc_composefs/boot.rs`).
+bootc puts the verity digest the whole read-only `/usr` hangs from
+(`cmdline_options.extend`, `crates/lib/src/bootc_composefs/boot.rs`). As of
+bootc 1.17 a fresh install writes it as `composefs.digest=v1-sha512-12:<hex>`;
+older installs and the legacy format use `composefs=<hex>`.
 In the BLS layout that digest lives in a plain-text entry on an unsigned FAT
 partition.
 
@@ -1189,7 +1191,7 @@ tree composefs empties before computing the digest the UKI has to embed
 so the build becomes two-pass. And `setup_composefs_uki_boot` never reads
 `root_setup.kargs`, which is what carries `rd.luks.uuid=` and
 `luks.options=` in the BLS path, so UKI and `--block-setup tpm2-luks` look
-mutually exclusive as of bootc 1.16.9. Untested here; test it in a VM before
+mutually exclusive as of bootc 1.17.1. Untested here; test it in a VM before
 believing either half.
 
 ## Updates

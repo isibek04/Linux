@@ -41,19 +41,28 @@ ARG DEBIAN_FRONTEND=noninteractive
 # nobody has booted. Bumping it is a commit, which is where a change like that
 # belongs.
 #
-# v1.16.9 is also the release the README's source references were read against
+# v1.17.1 is also the release the README's source references were read against
 # (the bootupd/systemd-boot branch in install.rs, the kargs handling in
 # bootc_composefs/boot.rs), so pinning it keeps the documentation and the
 # binary describing the same program.
 #
 # Set to a different tag to test one; empty still means "newest release".
-ARG BOOTC_REF="v1.16.9"
+ARG BOOTC_REF="v1.17.1"
 
 # The C-side build inputs. rustc and cargo come from rustup rather than the
 # archive because bootc's minimum supported Rust version moves faster than a
 # Debian stable release does. The ostree packages come from forky via a
 # pin (see ostree-forky.sh): bootc needs libostree >= 2025.3, trixie has
 # 2025.2.
+#
+# libclang-dev and libselinux1-dev are for the `selinux` cargo feature, a
+# default since bootc 1.17.0: the selinux-sys crate generates its bindings
+# with bindgen, which panics with "Unable to find libclang" without it.
+# libostree-dev already pulls libselinux1-dev in; it is named here because
+# bootc now needs it in its own right. Building with the feature off would
+# mean restating every other default feature by hand, and Debian runs with
+# SELinux disabled anyway, which libselinux reports and bootc honours. The
+# runtime library, libselinux1, is in every Debian base system already.
 #
 # --no-install-recommends stays in this stage. Nothing here is shipped -- only
 # /output is copied into stage 2 -- so recommends would buy the image nothing
@@ -62,7 +71,8 @@ COPY build/ostree-forky.sh /tmp/build/
 RUN /tmp/build/ostree-forky.sh \
  && apt-get install -y --no-install-recommends \
       build-essential ca-certificates curl git go-md2man jq \
-      libostree-dev libzstd-dev make ostree pkgconf \
+      libclang-dev libostree-dev libselinux1-dev libzstd-dev make ostree \
+      pkgconf \
  && rm -rf /var/lib/apt/lists/*
 
 ENV CARGO_HOME=/usr/local/cargo \
@@ -134,7 +144,7 @@ RUN /tmp/build/dracut-config.sh
 # install_binaries() skips a `.efi` when a `.efi.signed` sits beside it, and
 # copy_one_file() drops the suffix at the destination (systemd 257,
 # src/bootctl/bootctl-install.c). bootc calls plain `bootctl install`
-# (crates/lib/src/bootloader.rs, bootc 1.16.9), so it inherits that behaviour
+# (crates/lib/src/bootloader.rs, bootc 1.17.1), so it inherits that behaviour
 # without knowing anything about it.
 #
 # The wifi, bluetooth and audio-DSP blobs have to be named explicitly, though.
@@ -409,8 +419,13 @@ CMD ["/sbin/init"]
 # kernel, initramfs and kernel arguments fused into one UKI, signed with the
 # leaf key of usr/share/os4/secureboot, with the composefs digest of the whole
 # root filesystem embedded in the cmdline. bootc's composefs backend
-# (experimental in the pinned v1.16.9) verifies that digest at boot, so the
+# (declared stable in v1.17.0) verifies that digest at boot, so the
 # signature on the UKI seals everything from firmware to /usr.
+#
+# Since v1.17.0 that is two digests of the same tree: `ukify` defaults to the
+# V1 EROFS format and writes `composefs.digest=v1-sha512-12:<hex>`, then adds
+# the V2 digest as `composefs=<hex>` for older bootc clients. bootc checks
+# every one it finds, so build/verify-sealed.sh checks both.
 #
 # A separate variant rather than a change to the main image, and the reason is
 # the deployed hosts: an image containing a UKI makes `bootc install` select
@@ -479,7 +494,9 @@ COPY build/uki-build.sh /usr/local/bin/uki-build
 # /usr's -- so files and directories underneath them are outside the measured
 # tree. Both must exist, which bootc-rootfs.sh sees to. Verified against bootc
 # v1.16.9 by hashing two images differing only in what the COPY had to create:
-# same digest either way.
+# same digest either way. The code that does it (empty_toplevel_dirs,
+# composefs-rs composefs-boot/src/lib.rs) is unchanged in v0.9.2, the
+# composefs-rs that bootc v1.17.1 builds against.
 #
 # Labels, STOPSIGNAL and CMD are inherited from the rootfs stage through FROM,
 # so nothing repeats here.
