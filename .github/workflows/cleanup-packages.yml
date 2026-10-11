@@ -21,8 +21,6 @@ permissions:
 
 env:
   OWNER: ${{ github.repository_owner }}
-  # publish.yml pushes to ghcr.io/<owner>/os4.
-  PACKAGE_NAME: os4
   MIN_VERSIONS_TO_KEEP: '10'
   MAX_AGE_DAYS: '30'
   DRY_RUN: ${{ inputs.dry_run || 'false' }}
@@ -30,6 +28,15 @@ env:
 jobs:
   cleanup:
     runs-on: ubuntu-24.04
+    # publish.yml pushes to two packages: ghcr.io/<owner>/os4, and
+    # ghcr.io/<owner>/linux for the sealed and nvidia images. Same rules for
+    # both.
+    strategy:
+      fail-fast: false
+      matrix:
+        package: [ os4, linux ]
+    env:
+      PACKAGE_NAME: ${{ matrix.package }}
 
     steps:
       # On ghcr.io a package version is a manifest digest carrying a list of
@@ -52,6 +59,14 @@ jobs:
             Organization) base="orgs/${OWNER}" ;;
             *)            base="users/${OWNER}" ;;
           esac
+          # A package exists from its first push on; until then there is
+          # nothing to prune. Any other error still fails the job.
+          if ! err="$(gh api "${base}/packages/container/${PACKAGE_NAME}" --silent 2>&1)"; then
+            case "${err}" in
+              *"HTTP 404"*) echo "No ${PACKAGE_NAME} package yet -- nothing to prune."; exit 0 ;;
+              *) echo "${err}" >&2; exit 1 ;;
+            esac
+          fi
           path="${base}/packages/container/${PACKAGE_NAME}/versions"
 
           all="$(gh api --paginate "${path}?per_page=100" | jq -s 'add // []')"
@@ -59,8 +74,9 @@ jobs:
 
           cutoff="$(date -u -d "${MAX_AGE_DAYS} days ago" +%s)"
 
-          # Tags that must never be pruned, each with or without -sealed.
-          protected='^(latest|main|v?[0-9]+(\.[0-9]+){0,2})(-sealed)?$'
+          # Tags that must never be pruned, each bare or with -sealed (os4) or
+          # -nvidia (linux).
+          protected='^(latest|main|v?[0-9]+(\.[0-9]+){0,2})(-sealed|-nvidia)?$'
           sigtag='^sha256-[0-9a-f]{64}(\.[a-z]+)?$'
 
           plan="$(echo "$all" | jq -c \

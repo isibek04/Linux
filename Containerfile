@@ -26,6 +26,10 @@
 # change to it a commit. That still makes this smaller than os3: a handful of
 # things os3 gets from rpmfusion, other third-party repos or vendor downloads
 # are not here. README.md lists them.
+#
+# The nvidia variant adds a seventh, NVIDIA's own repository, for the driver
+# alone and only while build/nvidia.sh runs; the images without it never touch
+# it.
 
 # --------------------------------------------------------------------------
 # Stage 1: bootc from source
@@ -368,6 +372,25 @@ RUN /tmp/build/tailscale.sh
 # amount of correct signing here can substitute for.
 RUN --mount=type=secret,id=sb_leaf_key,target=/run/secrets/sb_leaf_key \
     /tmp/build/v4l2loopback.sh
+
+# NVIDIA's proprietary driver, for the `linux:*-nvidia` images and nothing
+# else: empty by default, and build/nvidia.sh does nothing when it is.
+# publish.yml passes `--build-arg NVIDIA_DRIVER=580` -- the last branch that
+# drives Maxwell -- for the nvidia variant only. The ARG is declared here
+# rather than at the top of the stage so that every layer above this one is
+# shared between the variants; everything below is built once per variant,
+# which it has to be anyway, since the initramfs and bootc-rootfs.sh both see
+# the driver.
+#
+# After v4l2loopback.sh, whose kernel headers DKMS builds against and whose
+# empty /var/lib/dkms/mok.key keeps dkms from generating a key into this
+# layer; before initramfs.sh, which has to see the dracut config that keeps
+# nouveau out. The module is signed as v4l2loopback's is, with the same
+# optional key. Where the 580 packages come from, and why their repository
+# is verified with gpgv rather than trixie's sqv, is in the script.
+ARG NVIDIA_DRIVER=""
+RUN --mount=type=secret,id=sb_leaf_key,target=/run/secrets/sb_leaf_key \
+    /tmp/build/nvidia.sh
 
 RUN /tmp/build/initramfs.sh
 
