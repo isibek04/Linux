@@ -13,6 +13,14 @@ deliberate difference: the desktop is KDE Plasma 6, where os3 runs LXQt.
 bootc switch ghcr.io/isibek04/os4:main
 ```
 
+Two more images are published under a second package, `linux`, both of them
+the sealed variant described under [Secure Boot](#secure-boot):
+
+| Image | What it is |
+| --- | --- |
+| `ghcr.io/isibek04/linux:main` | `os4:main-sealed`, the same manifest under a second name |
+| `ghcr.io/isibek04/linux:main-nvidia` | The same sealed build with NVIDIA's 580 driver in it — see [NVIDIA's driver, in the `-nvidia` image](#nvidias-driver-in-the--nvidia-image) |
+
 ## Why this repo is longer than os3's
 
 os3's Containerfile starts with one line:
@@ -303,7 +311,83 @@ never picks it on its own. It runs straight after `apt-sources.sh`, because
 `kde-standard` pulls Mesa in well before the GPU stack names it.
 
 This does not make the dGPU fast. Nouveau cannot raise Maxwell's clocks on its
-own, so the card stays at its boot clocks, which NVK does nothing about.
+own, so the card stays at its boot clocks, which NVK does nothing about. The
+`-nvidia` image below is the answer to that.
+
+### NVIDIA's driver, in the `-nvidia` image
+
+`linux:main-nvidia` is the sealed image with NVIDIA's proprietary driver in
+place of nouveau. The branch is 580, because it is the last one that drives
+Maxwell, Pascal and Volta — 590 dropped them. It is the proprietary kernel
+module, `nvidia-kernel-dkms`, not the open one, which starts at Turing.
+
+Getting 580 onto trixie takes more than an apt line:
+
+- **Debian has no 580.** Trixie, its backports and sid all stop at 550, and
+  NVIDIA's own `debian13` repository starts at 590. The 580 packages exist only
+  in NVIDIA's `debian12` repository. They are self-contained binaries against
+  libc, X and Wayland, and they install and build against trixie's 6.12 kernel
+  cleanly.
+- **Three companion libraries come along.** `nvidia-driver-libs` at 580 wants
+  `libnvidia-egl-wayland1` 1.1.19 or later, and trixie has 1.1.18. It also
+  wants `libnvidia-egl-xcb1` and `-xlib1`, which trixie does not package.
+  `build/nvidia.sh` pins NVIDIA's repository to 100 as a whole, then raises
+  only the driver's own sources (at `580.*`, since the repository carries 590
+  and newer as well) and `egl-wayland`, `egl-gbm` and `egl-x11` to 990. Nothing
+  else in it, and it carries CUDA and a good deal more, is ever chosen.
+- **Trixie's apt cannot verify the repository.** The signing key, `cudatools`
+  (`EB69 3B30 35CD 5710 E231 E123 A4B4 6996 3BF8 63CC`), binds its user ID with
+  a SHA-1 self-signature, and trixie's `sqv` has rejected those since
+  2026-02-01. The signature on the repository itself is SHA-256. So the key is
+  fingerprint-pinned as every vendor key here is, and one `apt-get update`,
+  pointed at the NVIDIA source alone, verifies with `gpgv`, which is what
+  bookworm's apt used. No apt.conf setting is written, so every other
+  repository keeps `sqv`. The source, its key and its pin are removed again
+  once the driver is in, because a host's own `apt update` could not verify it
+  either. The driver is updated the way everything else is: by the next image
+  build, at the newest 580 point release.
+
+The rest is what a driver needs in image mode:
+
+- **The modules are signed** with the Secure Boot leaf key, the same way and
+  for the same reason as [v4l2loopback's](#v4l2loopback-and-a-module-signature-that-is-not-the-ukis).
+  The `openssl` and `sign-file` calls now live in `build/sign-module.sh`, which
+  both scripts call. The modules go back to xz after signing: `nvidia.ko` is
+  ~100 MiB uncompressed. They load under lockdown on a host that has enrolled
+  the os4 CA *and* run `mokutil --trust-mok`, which the sealed image needs
+  anyway.
+- **Neither nouveau nor nvidia goes in the initramfs.** The package blacklists
+  nouveau in `/etc/modprobe.d`, but the initramfs is built `hostonly=no`, and
+  dracut's drm module takes every DRM driver it finds. That would mean nouveau
+  binding the card before the root's blacklist exists, and the nvidia modules
+  with ~70 MiB of GSP firmware a Maxwell card never loads, in a UKI that lives
+  on the ESP. A dracut `omit_drivers` keeps both out, and nvidia loads from
+  the root.
+- **The suspend units are enabled.** The package sets
+  `NVreg_PreserveVideoMemoryAllocations=1`, which relies on
+  `nvidia-suspend`, `-resume`, `-hibernate` and `-suspend-then-hibernate` to
+  save video memory, and enables none of them. `nvidia-drm.modeset=1` is the
+  package's own default, so the Wayland session works as it is.
+- **DKMS's copy of the modules is deleted** in the same layer, so ~90 MiB of
+  unsigned duplicates do not ride along in the image's history.
+
+It is the one variant built with an argument. The Containerfile declares
+`ARG NVIDIA_DRIVER` just after the v4l2loopback step, and `build/nvidia.sh`
+does nothing when it is empty. So every layer above it is shared with the
+other images, and only the tail is built again: the driver, the initramfs,
+`bootc-rootfs.sh` and the sealed stages. The build has its own UKI, because a
+different tree is a different composefs digest. It is built only when the
+sealed variant is, so it always has the key. It is verified with
+`verify-sealed.sh` like the sealed image. A failure in it fails the job only
+at the very end, after everything else has been pushed: it depends on a
+repository nothing else here touches.
+
+Build it locally with:
+
+```
+podman build --target rootfs --build-arg NVIDIA_DRIVER=580 \
+  --secret id=sb_leaf_key,env=SB_LEAF_KEY -f Containerfile .
+```
 
 ## What os3 has that this does not
 
@@ -900,9 +984,9 @@ correct outcome and the point of the exercise.
 
 | Workflow | Trigger | Notes |
 | --- | --- | --- |
-| `publish.yml` | push to `main`, PRs, releases, every other day | Builds with rootful podman on a GitHub-hosted `ubuntu-24.04` runner, with the container store moved to the runner's `/mnt` disk for space, then pushes to `ghcr.io/<owner>/os4` with `skopeo copy --format oci` — not `docker push`, see [OCI media types are not optional](#oci-media-types-are-not-optional). Signs each pushed digest with keyless cosign. PRs build without pushing. |
+| `publish.yml` | push to `main`, PRs, releases, every other day | Builds with rootful podman on a GitHub-hosted `ubuntu-24.04` runner, with the container store moved to the runner's `/mnt` disk for space, then pushes to `ghcr.io/<owner>/os4` with `skopeo copy --format oci` — not `docker push`, see [OCI media types are not optional](#oci-media-types-are-not-optional). The sealed image also goes to `ghcr.io/<owner>/linux` under the plain tag names, and the nvidia variant to the same package with `-nvidia`. Signs each pushed digest with keyless cosign, in each package it was pushed to. PRs build without pushing. |
 | `build-disk.yml` | manual | os3's anaconda-ISO workflow, adapted. Anaconda is Fedora's installer and cannot install a Debian root, so this produces a qcow2 (or raw, or vmdk) disk image instead. Does not currently work — see [Installing to a disk](#installing-to-a-disk). |
-| `cleanup-packages.yml` | daily | Prunes `ghcr.io` versions older than 30 days beyond the newest 10, never touching a digest tagged `latest`, `main` or a version number (or their `-sealed` twins). A cosign signature goes when the image it signs does, and not before. `workflow_dispatch` has a dry-run switch. |
+| `cleanup-packages.yml` | daily | Prunes `ghcr.io` versions of both `os4` and `linux` older than 30 days beyond the newest 10, never touching a digest tagged `latest`, `main` or a version number (or their `-sealed` and `-nvidia` twins). A cosign signature goes when the image it signs does, and not before. `workflow_dispatch` has a dry-run switch. |
 
 Repository secrets: `SB_LEAF_KEY` (the Secure Boot leaf key; without it the
 sealed variant is skipped and v4l2loopback ships unsigned), and
@@ -927,6 +1011,10 @@ cosign verify \
   --certificate-identity-regexp '^https://github\.com/isibek04/Linux/\.github/workflows/publish\.yml@refs/(heads/main|tags/v.+)$' \
   ghcr.io/isibek04/os4:main
 ```
+
+The `linux` images verify the same way, with `ghcr.io/isibek04/linux:main` or
+`ghcr.io/isibek04/linux:main-nvidia` as the last argument: they are signed in
+that package too.
 
 ## Installing to a disk
 

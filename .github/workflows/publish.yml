@@ -32,6 +32,13 @@ env:
   # repository owner, whatever the repository itself is called. Lowercased in
   # the meta step, since ghcr.io refuses uppercase and owners may have it.
   IMAGE_NAME: ${{ github.repository_owner }}/os4
+  # A second package, `linux`, carrying the sealed images only: `linux:main`
+  # is the very manifest `os4:main-sealed` is, and `linux:main-nvidia` is the
+  # same sealed build with NVIDIA's driver in it. Lowercased the same way.
+  LINUX_IMAGE_NAME: ${{ github.repository_owner }}/linux
+  # The driver branch the -nvidia images are built with: 580 is the last that
+  # drives Maxwell, Pascal and Volta. See build/nvidia.sh.
+  NVIDIA_DRIVER: '580'
   # Every registry client in this workflow reads its credentials from here.
   # podman and skopeo both honour this variable, and the default shell below
   # carries it through sudo.
@@ -134,6 +141,23 @@ jobs:
           echo "sealed_tags=${sealed}" >> "$GITHUB_OUTPUT"
           echo "Resolved sealed tags: ${sealed}"
 
+          # The linux package takes the same tag names without the suffix for
+          # the sealed image -- linux:main is os4:main-sealed -- and with
+          # -nvidia for the nvidia variant: linux:main-nvidia, linux:pr-N-nvidia.
+          linux_image="$(echo "${REGISTRY}/${LINUX_IMAGE_NAME}" | tr '[:upper:]' '[:lower:]')"
+          linux="" nvidia=""
+          for t in ${tags}; do
+            linux="${linux} ${linux_image}:${t##*:}"
+            nvidia="${nvidia} ${linux_image}:${t##*:}-nvidia"
+          done
+          linux="$(echo ${linux} | xargs)"
+          nvidia="$(echo ${nvidia} | xargs)"
+          echo "linux_image=${linux_image}" >> "$GITHUB_OUTPUT"
+          echo "linux_tags=${linux}" >> "$GITHUB_OUTPUT"
+          echo "nvidia_tags=${nvidia}" >> "$GITHUB_OUTPUT"
+          echo "Resolved linux tags: ${linux}"
+          echo "Resolved nvidia tags: ${nvidia}"
+
       # SB_LEAF_KEY reaches this build too, not just the sealed one below: the
       # v4l2loopback module DKMS builds in build/v4l2loopback.sh is signed
       # with the same leaf key the sealed variant's UKI uses (see README.md's
@@ -222,6 +246,52 @@ jobs:
             .
           echo "built=true" >> "$GITHUB_OUTPUT"
 
+      # The nvidia variant: the sealed image again, with NVIDIA_DRIVER set.
+      # The Containerfile declares that ARG just after v4l2loopback, so every
+      # layer above it comes from the builds above and only the tail is built
+      # again -- the driver, then the initramfs, bootc-rootfs.sh and the split,
+      # all of which see it. Then a UKI of its own: a different tree is a
+      # different composefs digest, so sign-uki.sh runs again over this split
+      # and replaces uki-out/, which the main sealed image no longer needs.
+      #
+      # Only when the sealed variant was built, which also means the key is
+      # there: the -nvidia tags are sealed images or nothing.
+      #
+      # continue-on-error, and the job failed at the end instead, for the
+      # reason the sealed verification below gives: this variant depends on a
+      # third-party repository the other images never touch, and its failure
+      # must not stop them being published.
+      - name: Build nvidia image
+        id: nvidia
+        if: steps.sealed.outputs.built == 'true'
+        continue-on-error: true
+        env:
+          SB_LEAF_KEY: ${{ secrets.SB_LEAF_KEY }}
+        run: |
+          split="os4-split-nvidia:${{ github.run_id }}"
+          tools="os4-uki-tools:${{ github.run_id }}"
+
+          podman build --format oci --target split --tag "${split}" \
+            --build-arg "NVIDIA_DRIVER=${NVIDIA_DRIVER}" \
+            --secret id=sb_leaf_key,env=SB_LEAF_KEY --file Containerfile .
+
+          ./build/sign-uki.sh "${split}" "${tools}"
+
+          args=""
+          for t in ${{ steps.meta.outputs.nvidia_tags }}; do
+            args="${args} --tag ${t}"
+          done
+          podman build \
+            --format oci \
+            --target sealed \
+            --build-arg "NVIDIA_DRIVER=${NVIDIA_DRIVER}" \
+            --label "org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}" \
+            --label "org.opencontainers.image.revision=${{ github.sha }}" \
+            ${args} \
+            --file Containerfile \
+            .
+          echo "built=true" >> "$GITHUB_OUTPUT"
+
       # A sealed image whose UKI does not match the tree it ships builds, signs
       # and pushes perfectly, and then no machine will take it:
       #
@@ -254,6 +324,22 @@ jobs:
             exit 0
           fi
           # Every sealed tag is the same manifest, so one is the whole check.
+          if ./build/verify-sealed.sh "$1"; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # The same check for the nvidia variant, recorded the same way.
+      - name: Verify the nvidia image is installable
+        id: verify_nvidia
+        if: steps.nvidia.outputs.built == 'true'
+        run: |
+          set -- ${{ steps.meta.outputs.nvidia_tags }}
+          if [ "$#" -eq 0 ]; then
+            echo "No nvidia tags resolved for this event -- nothing to verify."
+            exit 0
+          fi
           if ./build/verify-sealed.sh "$1"; then
             echo "ok=true" >> "$GITHUB_OUTPUT"
           else
@@ -322,7 +408,9 @@ jobs:
           echo "digest=${digest}" >> "$GITHUB_OUTPUT"
           echo "image=${first%:*}" >> "$GITHUB_OUTPUT"
 
-      # Same push, for the sealed variant.
+      # Same push, for the sealed variant -- to its -sealed tags in os4 and to
+      # the plain ones in linux. One manifest, so one digest for both, copied
+      # registry-side off the first tag like every other tag here.
       - name: Push sealed image
         id: push_sealed
         if: github.event_name != 'pull_request' && steps.verify.outputs.ok == 'true'
@@ -330,9 +418,40 @@ jobs:
           auth="${REGISTRY_AUTH_FILE}"
           digestfile="$(mktemp)"
 
-          set -- ${{ steps.meta.outputs.sealed_tags }}
+          set -- ${{ steps.meta.outputs.sealed_tags }} ${{ steps.meta.outputs.linux_tags }}
           if [ "$#" -eq 0 ]; then
             echo "No sealed tags resolved for this event -- nothing to push."
+            exit 0
+          fi
+          first="$1"
+          shift
+
+          skopeo copy --format oci \
+            --dest-authfile "${auth}" \
+            --digestfile "${digestfile}" \
+            "containers-storage:${first}" "docker://${first}"
+
+          for t in "$@"; do
+            skopeo copy --format oci \
+              --src-authfile "${auth}" --dest-authfile "${auth}" \
+              "docker://${first}" "docker://${t}"
+          done
+
+          digest="$(cat "${digestfile}")"
+          echo "Pushed ${digest} as: ${first} $*"
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+
+      # Same push, for the nvidia variant.
+      - name: Push nvidia image
+        id: push_nvidia
+        if: github.event_name != 'pull_request' && steps.verify_nvidia.outputs.ok == 'true'
+        run: |
+          auth="${REGISTRY_AUTH_FILE}"
+          digestfile="$(mktemp)"
+
+          set -- ${{ steps.meta.outputs.nvidia_tags }}
+          if [ "$#" -eq 0 ]; then
+            echo "No nvidia tags resolved for this event -- nothing to push."
             exit 0
           fi
           first="$1"
@@ -367,8 +486,10 @@ jobs:
       # the repository and workflow path become publicly visible even while
       # the repository is private.
       #
-      # Signed once, by digest, rather than once per tag: every tag resolves to
-      # the same manifest. The digest comes from the push step -- `podman
+      # Signed once per repository, by digest, rather than once per tag: every
+      # tag resolves to the same manifest. Once per repository because cosign
+      # keeps a signature next to the image in the repository it was asked
+      # about -- the sealed manifest is signed in os4 and again in linux. The digest comes from the push step -- `podman
       # inspect` reports what the local store holds, and the store is not what
       # the registry sees.
       - name: Sign the published image
@@ -381,12 +502,19 @@ jobs:
           # Empty when the sealed variant was skipped or not pushed; the same
           # image repository either way, so IMAGE serves both.
           DIGEST_SEALED: ${{ steps.push_sealed.outputs.digest }}
+          LINUX_IMAGE: ${{ steps.meta.outputs.linux_image }}
+          # Empty when the nvidia variant was skipped, failed or not pushed.
+          DIGEST_NVIDIA: ${{ steps.push_nvidia.outputs.digest }}
         run: |
           printf '%s' "${REGISTRY_TOKEN}" \
             | cosign login "${REGISTRY}" --username "${{ github.actor }}" --password-stdin
           cosign sign --yes "${IMAGE}@${DIGEST}"
           if [ -n "${DIGEST_SEALED}" ]; then
             cosign sign --yes "${IMAGE}@${DIGEST_SEALED}"
+            cosign sign --yes "${LINUX_IMAGE}@${DIGEST_SEALED}"
+          fi
+          if [ -n "${DIGEST_NVIDIA}" ]; then
+            cosign sign --yes "${LINUX_IMAGE}@${DIGEST_NVIDIA}"
           fi
 
       # Last, so that everything the sealed variant does not affect has already
@@ -398,4 +526,12 @@ jobs:
           echo "The sealed variant was built but not published: its UKI is" >&2
           echo "sealed against a different tree than the image itself. See the" >&2
           echo "dumpfile diff in the verification step above." >&2
+          exit 1
+
+      - name: Fail if the nvidia image did not build or verify
+        if: steps.nvidia.outcome == 'failure' || steps.verify_nvidia.outputs.ok == 'false'
+        run: |
+          echo "The nvidia variant was not published: it failed to build, or its" >&2
+          echo "UKI did not verify. See the 'Build nvidia image' and 'Verify the" >&2
+          echo "nvidia image is installable' steps above." >&2
           exit 1
