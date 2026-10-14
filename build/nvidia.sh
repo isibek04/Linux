@@ -125,13 +125,22 @@ apt-get update \
   exit 1
 }
 
-apt-get install -y nvidia-driver nvidia-kernel-dkms
+# nvidia-smi is its own package, which nothing in the driver's dependencies
+# names. It comes from the same source, so the pin above keeps it on the
+# branch, and libnvidia-ml1, the NVML library it is a front end to, is already
+# a dependency of the GL and EGL cores.
+apt-get install -y nvidia-driver nvidia-kernel-dkms nvidia-smi
 
 installed="$(dpkg-query -W -f '${Version}' nvidia-driver)"
 case "${installed}" in
   "${branch}".*) echo "nvidia: installed nvidia-driver ${installed}" ;;
   *) echo "nvidia: expected the ${branch} branch, got nvidia-driver ${installed}" >&2; exit 1 ;;
 esac
+smi="$(dpkg-query -W -f '${Version}' nvidia-smi)"
+[ "${smi}" = "${installed}" ] || {
+  echo "nvidia: nvidia-smi ${smi} does not match nvidia-driver ${installed}" >&2
+  exit 1
+}
 
 rm -f "${sources}" "${keyring}" "${prefs}"
 rm -rf /var/lib/apt/lists/developer.download.nvidia.com_*

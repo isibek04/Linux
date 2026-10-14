@@ -368,6 +368,9 @@ The rest is what a driver needs in image mode:
   `nvidia-suspend`, `-resume`, `-hibernate` and `-suspend-then-hibernate` to
   save video memory, and enables none of them. `nvidia-drm.modeset=1` is the
   package's own default, so the Wayland session works as it is.
+- **`nvidia-smi` is installed alongside.** It is a package of its own that
+  the driver does not pull in, from the same source and so on the same pinned
+  version; the NVML library it talks to already comes with the driver.
 - **DKMS's copy of the modules is deleted** in the same layer, so ~90 MiB of
   unsigned duplicates do not ride along in the image's history.
 
