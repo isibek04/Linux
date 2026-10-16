@@ -11,23 +11,24 @@
 # from source, and the second assembles the bootable root by hand before
 # installing the desktop on it.
 #
-# Almost everything installed comes from the Debian archive. Six things do
-# not: three vendor apt repositories -- Anthropic's, for the Claude desktop
-# app, Google's, for Chrome, and Tailscale's, for the node agent -- each with
+# Almost everything installed comes from the Debian archive. Seven things do
+# not: four vendor apt repositories -- Anthropic's, for the Claude desktop
+# app, Google's, for Chrome, Tailscale's, for the node agent, and Microsoft's,
+# for VS Code -- each with
 # its signing key pinned to a fingerprint the build refuses to proceed without,
 # and three bare `.deb`s: pandoc, whose GitHub release is pinned by version and
 # SHA-256 instead because trixie's is two years old and there is no backport;
 # the UDS client, pinned the same way, from the university's VDI broker
 # because that is the only place it is published; and GLPI Agent, pinned the
 # same way from its GitHub release, because trixie does not package it.
-# Tailscale's is the weakest of the three pins: it documents no fingerprint to
-# check the key against the way the other two do, so what build/tailscale.sh
+# Tailscale's is the weakest of the four pins: it documents no fingerprint to
+# check the key against the way the other three do, so what build/tailscale.sh
 # records is simply the key the repository serves -- which at least makes a
 # change to it a commit. That still makes this smaller than os3: a handful of
 # things os3 gets from rpmfusion, other third-party repos or vendor downloads
 # are not here. README.md lists them.
 #
-# The nvidia variant adds a seventh, NVIDIA's own repository, for the driver
+# The nvidia variant adds an eighth, NVIDIA's own repository, for the driver
 # alone and only while build/nvidia.sh runs; the images without it never touch
 # it.
 
@@ -359,6 +360,15 @@ RUN /tmp/build/google-chrome.sh
 # a machine is what turns it on. Same constraint as every package step: ahead of
 # bootc-rootfs.sh.
 RUN /tmp/build/tailscale.sh
+
+# Microsoft's apt repository and VS Code from it, on the same terms: a pinned
+# signing key, this image's own deb822 entry, and the package told through
+# debconf not to register a second one along with a second copy of the key.
+# Debian packages no VS Code at all -- `code-oss` and VSCodium are not in the
+# archive -- so the vendor build is the only one apt can give. Everything lands
+# in /usr/share/code, so there is nothing to correct for image mode. Same
+# constraint as every package step: ahead of bootc-rootfs.sh.
+RUN /tmp/build/vscode.sh
 
 # v4l2loopback, built against this kernel by DKMS and signed with the Secure
 # Boot leaf key so it loads under the lockdown every host engages once it has

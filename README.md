@@ -394,10 +394,10 @@ podman build --target rootfs --build-arg NVIDIA_DRIVER=580 \
 
 ## What os3 has that this does not
 
-Almost everything installed here comes from the Debian archive. There are six
-exceptions. Three are vendor apt repositories with a pinned signing key —
-Anthropic's, for the Claude desktop app, Google's, for Chrome, and Tailscale's,
-for the node agent — and three are bare `.deb`s: pandoc, which is in the archive
+Almost everything installed here comes from the Debian archive. There are seven
+exceptions. Four are vendor apt repositories with a pinned signing key —
+Anthropic's, for the Claude desktop app, Google's, for Chrome, Tailscale's,
+for the node agent, and Microsoft's, for VS Code — and three are bare `.deb`s: pandoc, which is in the archive
 but two years behind upstream and has no backport — see [Pandoc, and a `.deb`
 worth pinning](#pandoc-and-a-deb-worth-pinning); the UDS client, which is
 published only by the VDI broker it connects to — see [The UDS client, and a
@@ -424,7 +424,8 @@ both are in trixie `main` and are installed. `google-chrome-stable` and
 `tailscale` have come off it too; see below.
 
 `claude-desktop` was the first row actually done the additive way, in
-`build/claude-desktop.sh`, and `google-chrome.sh` and `tailscale.sh` follow it:
+`build/claude-desktop.sh`, and `google-chrome.sh`, `tailscale.sh` and
+`vscode.sh` follow it:
 fetch the key, **pin its fingerprint**, write a deb822 entry, install the
 package. The pin is the part worth copying — a keyring baked into the image
 authorises root-owned packages on every host that boots it.
@@ -544,13 +545,14 @@ then `systemctl --user restart plasma-plasmashell`.
 
 ### The third-party installs, side by side
 
-What image mode actually asks of each of the six:
+What image mode actually asks of each of the seven:
 
 | | Trust anchor | Lands in `/opt` | Self-update target |
 | --- | --- | --- | --- |
 | `claude-desktop` | Anthropic's key, fingerprint pinned | No — `/usr/lib` | apt, so the image |
 | `google-chrome-stable` | Google's key, fingerprint pinned | 431 MiB, folded into `/usr/lib/opt`; AppArmor profile re-pointed, daily cron symlink removed | apt, so the image — but `/etc/cron.daily/google-chrome` would write to a read-only `/usr/share/keyrings` |
 | `tailscale` | Tailscale's key, fingerprint recorded — but not one Tailscale publishes | No — `/usr/bin`, `/usr/sbin` | apt, so the image — unless `--auto-update` is switched on, which shells out to `apt-get` and cannot work here |
+| `code` | Microsoft's key, fingerprint pinned; the package's own repo entry and key suppressed through debconf | No — `/usr/share/code` | apt, so the image — VS Code itself only notifies on a `.deb` install, it does not replace itself |
 | `pandoc` | SHA-256 of the release `.deb`, pinned with its version | No — `/usr/bin` | None; the image |
 | `udsclient3` | SHA-256 of the broker's `.deb`, pinned with its version | No — `/usr/lib/UDSClient` | None; the image |
 | `glpi-agent` | SHA-256 of the release `.deb`, pinned with its version | No — `/usr/share/glpi-agent`; empty `/var/lib/glpi-agent` becomes a tmpfiles entry | None; the image |
